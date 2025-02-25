@@ -15,7 +15,7 @@ Whisper 모델을 활용한 실시간 음성 인식 및 번역 프로그램입�
 
 ## 시스템 요구사항
 - Python 3.8 이상
-- PyAudio, NumPy, WebRTCVAD
+- PyAudio(portaudio 사전 설치 필수), NumPy, WebRTCVAD
 - OpenAI Whisper 또는 Faster-Whisper
 - 옵션: GPU 지원 (CUDA)
 - 옵션: Apple Silicon의 경우 MLX 지원
@@ -23,18 +23,16 @@ Whisper 모델을 활용한 실시간 음성 인식 및 번역 프로그램입�
 ## 설치 방법
 ```bash
 # 저장소 클론
-git clone https://github.com/yourusername/realtime-whisper-transcriber.git
-cd realtime-whisper-transcriber
+git clone https://github.com/leonardo204/whisper_mlx.git
+cd whisper_mlx
 
 # 필수 패키지 설치
 pip install -r requirements.txt
 
 # Whisper 모델 설치 (옵션 중 하나 선택)
-pip install openai-whisper  # 기본 Whisper
+pip install faster-whisper   # Faster Whisper (현재 실험중)
 # 또는
-pip install faster-whisper   # Faster Whisper (권장)
-# 또는
-pip install lightning-whisper-mlx  # Apple Silicon 최적화 버전
+pip install lightning-whisper-mlx  # Apple Silicon 최적화 버전 (권장)
 ```
 
 ## 사용 방법
