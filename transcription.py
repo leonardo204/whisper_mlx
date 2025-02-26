@@ -456,6 +456,7 @@ class WhisperTranscriber:
                     oldest_key = next(iter(self.cache))
                     del self.cache[oldest_key]
 
+            print(f"\n")
             self.logger.log_info(
                 f"전사 완료 - 언어: {result['language_name']}, "
                 f"길이: {result['audio_duration']:.2f}초, "

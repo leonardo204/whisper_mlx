@@ -253,11 +253,11 @@ class RealTimeTranscriber:
 
         if 'translation' in result:
             # 번역이 포함된 경우
-            print(f"\n[전사완료][{duration:.2f}초][{result['language_name']}] {result['text']}")
-            print(f"[번역완료][{result['translation']['duration']:.2f}초][한국어] {result['translation']['text']}")
+            print(f"[전사완료][{duration:.2f}초][{result['language_name']}] {result['text']}")
+            print(f"[번역완료][{result['translation']['duration']:.2f}초][한국어] {result['translation']['text']}\n")
         else:
             # 번역이 없는 경우
-            print(f"\n[전사완료][{duration:.2f}초][{result['language_name']}] {result['text']}")
+            print(f"[전사완료][{duration:.2f}초][{result['language_name']}] {result['text']}\n")
 
     def _monitor_status(self):
         """상태 모니터링 워크플로우"""
