@@ -18,51 +18,54 @@ class AudioSegmenter:
         """오디오 세그멘터 초기화"""
         self.logger = LogManager()
         self.logger.log_info(f"오디오 세그멘터 초기화 (샘플레이트: {sample_rate}Hz)")
-
+    
         self.sample_rate = sample_rate
-
+    
         # VAD 초기화 (0-3 범위의 모드, 높을수록 더 엄격한 음성 감지)
         self.vad_mode = 1  # 중간 정도의 엄격성
         self.vad = webrtcvad.Vad(self.vad_mode)
-
+    
         # 프레임 크기 및 지속시간 설정
         self.frame_duration_ms = 30  # 30ms (WebRTC VAD의 표준 프레임 크기)
         self.frame_size = int(sample_rate * self.frame_duration_ms / 1000)
         self.logger.log_debug(f"프레임 크기: {self.frame_size} 샘플 ({self.frame_duration_ms}ms)")
-
+    
         # 세그먼트 설정
         self.config = {
             'min_segment_duration': 1.0,       # 최소 세그먼트 길이 (초)
             'max_segment_duration': 10.0,      # 기본 최대 세그먼트 길이 (초)
-            'absolute_max_duration': 15.0,     # 절대 최대 세그먼트 길이 (초) - 새로 추가
+            'absolute_max_duration': 15.0,     # 절대 최대 세그먼트 길이 (초)
             'speech_pad_duration': 0.3,        # 음성 전후 패딩 (초)
             'min_speech_duration': 0.3,        # 최소 음성 인식 길이 (초)
             'silence_threshold': 0.3,          # 묵음 간주할 임계값 (초)
             'max_silence_length': 1.5,         # 세그먼트 내 허용 묵음 길이 (초)
             'energy_threshold': 0.001,         # 음성 에너지 임계값
             'energy_boost_threshold': 0.01,    # 에너지 기반 음성 감지 부스트 임계값
-            'adaptive_segmentation': True      # 적응형 세그먼테이션 활성화 - 새로 추가
+            'adaptive_segmentation': True      # 적응형 세그먼테이션 활성화
         }
-
+    
         # 샘플 단위로 변환
         self.min_segment_samples = int(self.config['min_segment_duration'] * sample_rate)
         self.max_segment_samples = int(self.config['max_segment_duration'] * sample_rate)
-        self.absolute_max_samples = int(self.config['absolute_max_duration'] * sample_rate)  # 새로 추가
+        self.absolute_max_samples = int(self.config['absolute_max_duration'] * sample_rate)
         self.speech_pad_samples = int(self.config['speech_pad_duration'] * sample_rate)
         self.min_speech_samples = int(self.config['min_speech_duration'] * sample_rate)
         self.min_speech_frames = int(self.config['min_speech_duration'] * 1000 / self.frame_duration_ms)
         self.silence_threshold_frames = int(self.config['silence_threshold'] * 1000 / self.frame_duration_ms)
         self.max_silence_frames = int(self.config['max_silence_length'] * 1000 / self.frame_duration_ms)
-
-
+    
         # 상태 변수 초기화
         self.reset_state()
-
+    
+        # 메모리 모니터링
+        self.memory_check_interval = 50  # 50번의 프레임마다 메모리 체크
+        self.frame_counter = 0
+        
         # 로깅
         self.logger.log_info(
             f"세그멘터 설정 - 최소 길이: {self.config['min_segment_duration']}초, "
             f"최대 길이: {self.config['max_segment_duration']}초, "
-            f"절대 최대 길이: {self.config['absolute_max_duration']}초, "  # 로그에도 추가
+            f"절대 최대 길이: {self.config['absolute_max_duration']}초, "
             f"VAD 모드: {self.vad_mode}"
         )
 
@@ -113,19 +116,33 @@ class AudioSegmenter:
     def process_chunk(self, audio_chunk: np.ndarray, energy: float) -> Optional[Dict]:
         """
         오디오 청크 처리 및 세그먼트 관리
-
+    
         Args:
             audio_chunk: 오디오 데이터 (float32 numpy 배열)
             energy: 오디오 청크의 에너지 레벨
-
+    
         Returns:
             완성된 세그먼트가 있는 경우 세그먼트 정보 포함한 딕셔너리, 없으면 None
         """
         try:
+            # 메모리 모니터링
+            self.frame_counter += 1
+            if self.frame_counter >= self.memory_check_interval:
+                self.frame_counter = 0
+                # buffer 크기 체크
+                buffer_size_mb = len(self.audio_buffer) * 4 / (1024 * 1024)  # float32 = 4 bytes
+                if buffer_size_mb > 10:  # 10MB 이상이면 경고
+                    self.logger.log_warning(f"오디오 버퍼 크기가 큽니다: {buffer_size_mb:.2f}MB")
+                    
+                    # 버퍼가 너무 크면 강제로 세그먼트 완료 처리
+                    if buffer_size_mb > 20:  # 20MB 이상이면 강제 세그먼트 완료
+                        self.logger.log_warning("버퍼 크기가 너무 큽니다. 세그먼트를 강제로 완료합니다.")
+                        return self._finalize_segment("memory_limit")
+            
             # 버퍼에 오디오 추가
             for sample in audio_chunk:
                 self.audio_buffer.append(sample)
-
+    
             # 프레임 단위 처리를 위한 분할
             frames = []
             frame_count = len(audio_chunk) // self.frame_size
@@ -134,19 +151,19 @@ class AudioSegmenter:
                 end_idx = start_idx + self.frame_size
                 if end_idx <= len(audio_chunk):
                     frames.append(audio_chunk[start_idx:end_idx])
-
+    
             # 각 프레임 분석
             for frame in frames:
                 frame_energy = np.sqrt(np.mean(np.square(frame)))
                 is_speech = self._is_speech(frame, frame_energy)
-
+    
                 if is_speech:
                     self.speech_frames += 1
                     self.silence_frames = 0
                     if not self.is_speech_active:
                         self.is_speech_active = True
                         self.logger.log_debug(f"음성 시작 감지 (에너지: {frame_energy:.6f})")
-
+    
                     # 음성 프레임 저장
                     self.voiced_frames.append(True)
                     self.last_voiced_frame_time = time.time()
@@ -155,19 +172,19 @@ class AudioSegmenter:
                     if self.is_speech_active and self.silence_frames > self.silence_threshold_frames:
                         self.is_speech_active = False
                         self.logger.log_debug(f"음성 종료 감지 (묵음 프레임: {self.silence_frames})")
-
+    
                     # 묵음 프레임 저장
                     self.voiced_frames.append(False)
-
+    
                 self.current_segment_frames += 1
-
+    
                 # 세그먼트 완료 조건 체크
                 segment_result = self._check_segment_complete()
                 if segment_result:
                     return segment_result
-
+    
             return None
-
+    
         except Exception as e:
             self.logger.log_error("chunk_processing", f"청크 처리 중 오류: {str(e)}")
             return None

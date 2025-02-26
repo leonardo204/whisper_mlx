@@ -265,25 +265,63 @@ class RealTimeTranscriber:
             while not self.stop_event.is_set():
                 # 10초마다 간단한 상태 업데이트
                 time.sleep(10)
-
+    
                 if self.stop_event.is_set():
                     break
-
+    
                 # 큐 상태 로깅
                 audio_queue_size = self.audio_queue.qsize()
                 segment_queue_size = self.segment_queue.qsize()
-
+    
                 if audio_queue_size > 20 or segment_queue_size > 5:
                     self.logger.log_warning(
                         f"큐 백로그 발생 - 오디오: {audio_queue_size}, 세그먼트: {segment_queue_size}"
                     )
-
+    
                 self.logger.log_debug(
                     f"상태 - 오디오 큐: {audio_queue_size}, 세그먼트 큐: {segment_queue_size}"
                 )
-
+                
+                # 메모리 모니터링 추가
+                self._monitor_memory_usage()
+    
         except Exception as e:
             self.logger.log_error("monitoring", f"모니터링 중 예외 발생: {str(e)}")
+
+    def _monitor_memory_usage(self):
+        """메모리 사용량 모니터링"""
+        try:
+            import psutil
+            import os
+            
+            process = psutil.Process(os.getpid())
+            memory_info = process.memory_info()
+            
+            # MB 단위로 변환
+            rss_mb = memory_info.rss / (1024 * 1024)
+            vms_mb = memory_info.vms / (1024 * 1024)
+            
+            self.logger.log_debug(f"메모리 사용량 - RSS: {rss_mb:.2f}MB, VMS: {vms_mb:.2f}MB")
+            
+            if rss_mb > 500:  # 500MB 이상 사용 시 경고
+                self.logger.log_warning(f"높은 메모리 사용량 감지: {rss_mb:.2f}MB")
+                
+                
+            # 메모리 사용량이 매우 높으면(4GB 이상) 강제 정리
+            if rss_mb > 4000:
+                self.logger.log_warning(f"메모리 사용량이 매우 높습니다. 캐시를 강제로 정리합니다.")
+                self.transcription_manager.transcriber.clear_cache()
+                import gc
+                gc.collect()
+                
+            return rss_mb, vms_mb
+        
+        except ImportError:
+            self.logger.log_debug("psutil 모듈이 설치되지 않아 메모리 모니터링을 수행할 수 없습니다")
+            return 0, 0
+        except Exception as e:
+            self.logger.log_error("memory_monitor", f"메모리 모니터링 중 오류: {str(e)}")
+            return 0, 0
 
     def _process_user_commands(self):
         """사용자 명령 처리"""
@@ -659,7 +697,6 @@ def check_dependencies():
         print("\n선택적 라이브러리 없이도 기본 기능은 작동합니다.")
 
     return True
-
 
 def parse_arguments():
     """명령줄 인수 파싱"""

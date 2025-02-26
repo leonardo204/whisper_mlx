@@ -321,60 +321,63 @@ class AudioRecorder:
 
     def record(self, queue, stop_event: threading.Event) -> None:
         """오디오 녹음 및 큐에 추가"""
+        stream = None
         try:
             stream = self._create_stream()
             self.logger.log_info("녹음을 시작합니다")
             print("\n녹음을 시작합니다...")
-
+    
             while not stop_event.is_set():
                 try:
                     # 오디오 데이터 읽기
                     process_start = time.time()
                     data = stream.read(self.chunk_size, exception_on_overflow=False)
-
+    
                     # float32로 변환
                     if self.format == pyaudio.paInt16:
                         audio_chunk = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
                     else:  # 이미 float32인 경우
                         audio_chunk = np.frombuffer(data, dtype=np.float32)
-
+    
                     # 간단한 전처리
                     processed_chunk = self._preprocess_audio(audio_chunk)
-
+    
                     # 에너지 레벨 계산
                     energy = self.calculate_energy(processed_chunk)
-
+    
                     # 큐에 추가
                     queue.put({
                         'audio': processed_chunk,
                         'energy': energy,
                         'timestamp': time.time()
                     })
-
+    
                     # 상태 업데이트
                     process_time = time.time() - process_start
                     self._update_status(process_time)
-
+    
                 except IOError as e:
                     self.stream_status['overflows'] += 1
                     self.logger.log_warning(f"버퍼 오버플로우 발생 ({self.stream_status['overflows']}번째)")
                     continue
-
+    
                 except Exception as e:
                     self.logger.log_error("recording", f"녹음 중 예외 발생: {str(e)}")
                     break
-
+    
         except Exception as e:
             self.logger.log_error("stream", f"스트림 생성 중 예외 발생: {str(e)}")
             print(f"\n[오류] 스트림 생성 중 예외 발생: {e}")
         finally:
+            # 스트림 정리 확실히 처리
             try:
-                stream.stop_stream()
-                stream.close()
-                self.logger.log_info("녹음이 중지되고 스트림이 정리되었습니다")
+                if stream is not None:
+                    stream.stop_stream()
+                    stream.close()
+                    self.logger.log_info("녹음이 중지되고 스트림이 정리되었습니다")
             except Exception as e:
                 self.logger.log_error("cleanup", f"스트림 정리 중 오류 발생: {str(e)}")
-
+    
             print("\n녹음이 중지되었습니다.")
 
     def record_to_file(self, filename: str, duration: float) -> bool:
@@ -437,8 +440,12 @@ class AudioRecorder:
     def __del__(self):
         """소멸자: 리소스 정리"""
         try:
-            if hasattr(self, 'audio'):
+            if hasattr(self, 'audio') and self.audio is not None:
                 self.audio.terminate()
-                self.logger.log_info("오디오 리소스가 정리되었습니다")
+                self.logger.log_info("오디오 장치 리소스가 정리되었습니다")
         except Exception as e:
-            self.logger.log_error("cleanup", f"리소스 정리 중 오류 발생: {str(e)}")
+            # 이미 로거가 소멸된 경우에 대비
+            if hasattr(self, 'logger'):
+                self.logger.log_error("cleanup", f"리소스 정리 중 오류 발생: {str(e)}")
+            else:
+                print(f"리소스 정리 중 오류 발생: {str(e)}")

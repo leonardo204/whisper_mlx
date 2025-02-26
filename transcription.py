@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import sys  # sys 모듈 추가
 import time
 import tempfile
 import json
@@ -257,40 +258,47 @@ class WhisperTranscriber:
         """Whisper 전사기 초기화"""
         self.logger = LogManager()
         self.logger.log_info(f"Whisper 전사기 초기화 (모델: {model_name})")
-
+    
         self.model_name = model_name
         self.use_faster_whisper = use_faster_whisper
         self.translator_enabled = translator_enabled
         self.translate_to = translate_to
-
+    
         self.text_processor = TextProcessor()
-
+    
         # 번역기 초기화 (옵션)
         self.translator = None
-        #if self.translator_enabled:
-        #    try:
-        #        self.translator = Translator()
-        #        self.logger.log_info("Google 번역기가 초기화되었습니다")
-        #    except Exception as e:
-        #        self.logger.log_error("translator_init", f"번역기 초기화 중 오류: {str(e)}")
-
+        if self.translator_enabled:
+            try:
+                self.translator = GoogleTranslator(source='auto', target=self.translate_to)
+                self.logger.log_info("Google 번역기가 초기화되었습니다")
+            except Exception as e:
+                self.logger.log_error("translator_init", f"번역기 초기화 중 오류: {str(e)}")
+    
         # Whisper 모델 초기화
         self.model = None
         self._init_model()
-
-        # 캐시 및 통계 변수 초기화
+    
+        # 캐시 관리 개선
         self.cache = {}  # 동일 오디오에 대한 결과 캐싱
+        self.cache_timestamps = {}  # 각 캐시 항목의 마지막 사용 시간
+        self.max_cache_size = 50  # 더 작은 캐시 크기
+        self.cache_memory_limit = 100 * 1024 * 1024  # 100MB 메모리 제한
+        self.current_cache_memory = 0  # 현재 캐시 메모리 사용량
+    
+        # 통계 변수 초기화
         self.stats = {
             'total_processed': 0,
             'cache_hits': 0,
             'avg_processing_time': 0,
             'language_counts': {},
-            'success_rate': 1.0
+            'success_rate': 1.0,
+            'cache_evictions': 0
         }
-
+    
         # 스레드 안전성
         self._lock = threading.Lock()
-
+    
         self.logger.log_info("Whisper 전사기가 초기화되었습니다")
 
     def _init_model(self):
@@ -370,46 +378,60 @@ class WhisperTranscriber:
     def process_audio(self, segment: Dict) -> Optional[Dict]:
         """
         오디오 세그먼트 전사 처리
-
+    
         Args:
             segment: 오디오 데이터 포함 세그먼트 딕셔너리
-
+    
         Returns:
             전사 결과 딕셔너리 또는 None
         """
         start_time = time.time()
         audio_data = segment.get('audio')
-
+    
         if audio_data is None or len(audio_data) == 0:
             self.logger.log_warning("전사 처리할 오디오 데이터가 없습니다")
             return None
-
-        # 캐시 키 생성 (오디오 데이터의 해시)
-        cache_key = str(hash(audio_data.tobytes()))
-
+    
+        # 캐시 키 생성 (오디오 데이터의 해시 - 더 효율적인 방법 사용)
+        # 전체 데이터 대신 샘플링된 오디오 데이터의 해시 사용
+        sample_rate = 16000  # 기본 샘플링 레이트
+        sample_duration = 3  # 초 단위의 샘플링 기간
+        sample_size = min(len(audio_data), int(sample_rate * sample_duration))
+        
+        # 균등하게 분포된 샘플 추출
+        if len(audio_data) > sample_size:
+            indices = np.linspace(0, len(audio_data)-1, sample_size, dtype=int)
+            audio_sample = audio_data[indices]
+        else:
+            audio_sample = audio_data
+            
+        # 해시 계산
+        cache_key = str(hash(audio_sample.tobytes()))
+    
         # 캐시 확인
         with self._lock:
             if cache_key in self.cache:
                 self.stats['cache_hits'] += 1
                 self.logger.log_debug("캐시에서 전사 결과를 찾았습니다")
+                # 캐시 타임스탬프 업데이트
+                self.cache_timestamps[cache_key] = time.time()
                 return self.cache[cache_key]
-
+    
         # 전사 처리
         try:
             transcription_result = self._transcribe_audio(audio_data)
             if not transcription_result:
                 return None
-
+    
             # 텍스트 후처리
             processed_text = self.text_processor.process_text(transcription_result.get('text', ''))
             if not processed_text:
                 return None
-
+    
             # 번역 (필요시)
             translation_result = None
             detected_language = transcription_result.get('language', 'unknown')
-
-            #if (self.translator_enabled and self.translator and
+    
             if (self.translator_enabled and
                 detected_language != self.translate_to and
                 detected_language in SUPPORTED_LANGUAGES):
@@ -417,7 +439,7 @@ class WhisperTranscriber:
                     translation_result = self._translate_text(processed_text, detected_language)
                 except Exception as e:
                     self.logger.log_error("translation", f"번역 중 오류: {str(e)}")
-
+    
             # 결과 생성
             processing_time = time.time() - start_time
             result = {
@@ -429,52 +451,79 @@ class WhisperTranscriber:
                 'audio_duration': segment.get('duration', 0),
                 'timestamp': time.time()
             }
-
+    
             # 번역 결과 추가 (있는 경우)
             if translation_result:
                 result['translation'] = translation_result
-
+    
             # 통계 업데이트
             with self._lock:
                 self.stats['total_processed'] += 1
+                if self.stats['total_processed'] % 5 == 0:  # 5개 세그먼트마다 GC 수행
+                    self._force_gc()
                 self.stats['avg_processing_time'] = (
                     (self.stats['avg_processing_time'] * (self.stats['total_processed'] - 1) +
                      processing_time) / self.stats['total_processed']
                 )
-
+    
                 # 언어별 카운트
                 if detected_language in self.stats['language_counts']:
                     self.stats['language_counts'][detected_language] += 1
                 else:
                     self.stats['language_counts'][detected_language] = 1
-
-                # 캐시 저장
+    
+                # 캐시 저장 전 메모리 관리
+                self._manage_cache()
+                
+                # 캐시 항목 크기 추정 (오디오 데이터 제외)
+                result_size = sys.getsizeof(str(result))
+                
+                # 캐시에 저장
                 self.cache[cache_key] = result
-
-                # 캐시 크기 제한 (최대 100개)
-                if len(self.cache) > 100:
-                    oldest_key = next(iter(self.cache))
-                    del self.cache[oldest_key]
-
+                self.cache_timestamps[cache_key] = time.time()
+                self.current_cache_memory += result_size
+    
             print(f"\n")
             self.logger.log_info(
                 f"전사 완료 - 언어: {result['language_name']}, "
                 f"길이: {result['audio_duration']:.2f}초, "
                 f"처리 시간: {processing_time:.2f}초"
             )
-
+    
             return result
-
+    
         except Exception as e:
             self.logger.log_error("transcription", f"전사 중 오류: {str(e)}")
-
+    
             # 실패 통계 업데이트
             with self._lock:
                 self.stats['total_processed'] += 1
                 # 성공률 업데이트 (지수 이동 평균)
                 self.stats['success_rate'] = 0.9 * self.stats['success_rate']
-
+    
             return None
+
+    def _manage_cache(self):
+        """캐시 크기 관리"""
+        # 캐시 크기가 제한을 초과하면 오래된 항목부터 제거
+        if len(self.cache) >= self.max_cache_size or self.current_cache_memory >= self.cache_memory_limit:
+            # 가장 오래된 항목 찾기
+            oldest_key = min(self.cache_timestamps.items(), key=lambda x: x[1])[0]
+            
+            # 제거할 항목의 크기 추정
+            removed_size = sys.getsizeof(str(self.cache[oldest_key]))
+            
+            # 캐시에서 제거
+            del self.cache[oldest_key]
+            del self.cache_timestamps[oldest_key]
+            
+            # 메모리 사용량 업데이트
+            self.current_cache_memory = max(0, self.current_cache_memory - removed_size)
+            
+            # 통계 업데이트
+            self.stats['cache_evictions'] += 1
+            
+            self.logger.log_debug(f"캐시 항목 제거됨 (현재 크기: {len(self.cache)})")
 
     def _transcribe_audio(self, audio_data: np.ndarray) -> Optional[Dict]:
         """Whisper 모델을 사용한 오디오 전사"""
@@ -577,7 +626,7 @@ class WhisperTranscriber:
             # source_lang이 'unknown'이면 'auto'로 설정
             src_lang = 'auto' if source_lang == 'unknown' else source_lang
             
-            # deep-translator를 사용한 번역
+            # 지연 초기화 적용 - 필요할 때만 번역기 생성
             translator = GoogleTranslator(source=src_lang, target=self.translate_to)
             translated_text = translator.translate(text)
             
@@ -607,6 +656,23 @@ class WhisperTranscriber:
                 if stats_copy['total_processed'] > 0 else 0
             )
             return stats_copy
+    
+    def _force_gc(self):
+        """강제 가비지 컬렉션 수행"""
+        try:
+            import gc
+            collected = gc.collect()
+            self.logger.log_debug(f"가비지 컬렉션 수행: {collected}개 객체 정리")
+        except Exception as e:
+            self.logger.log_error("gc", f"가비지 컬렉션 중 오류: {str(e)}")
+    
+    def clear_cache(self):
+        """캐시 완전 삭제"""
+        with self._lock:
+            self.cache.clear()
+            self.cache_timestamps.clear()
+            self.current_cache_memory = 0
+            self.logger.log_info("캐시가 완전히 정리되었습니다")
 
     def set_translate_language(self, language_code: str) -> bool:
         """번역 대상 언어 설정"""
