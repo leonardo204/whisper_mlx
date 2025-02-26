@@ -10,17 +10,18 @@ Whisper 모델을 활용한 실시간 음성 인식 및 번역 프로그램입�
 - 🌍 **다국어 지원**: 다양한 언어 자동 감지 및 인식
 - 🔄 **자동 번역**: Google Translator를 이용한 한국어 번역
 - 📊 **분석 및 모니터링**: 실시간 처리 상태 및 통계 제공
-- 💻 **Apple Silicon 최적화**: M1/M2 Mac에서 MLX 기반 가속 지원
+- 💻 **Apple Silicon 최적화**: Apple silicon Mac에서 MLX 기반 가속 지원
 - 📝 **텍스트 후처리**: 반복 제거, 문장 완성도 개선 등 텍스트 정제
 
 ## 시스템 요구사항
 - Python 3.8 이상
 - PyAudio(portaudio 사전 설치 필수), NumPy, WebRTCVAD
-- OpenAI Whisper 또는 Faster-Whisper
-- 옵션: GPU 지원 (CUDA)
-- 옵션: Apple Silicon의 경우 MLX 지원
+- Apple Silicon MLX 지원 (LightningWhisperMlx)
+- OpenAI Whisper 또는 Faster-Whisper (현재 공사중)
+- 옵션: GPU 지원 (CUDA) (현재 공사중)
 
 ## 설치 방법
+> venv 가상 개발 환경 추천
 ```bash
 # 저장소 클론
 git clone https://github.com/leonardo204/whisper_mlx.git
@@ -71,6 +72,7 @@ python main.py --debug  # 상세 로그 출력
 ```
 
 ## 참고자료
+- [LightningWhisperMlx](https://github.com/mustafaaljadery/lightning-whisper-mlx)
 - [OpenAI Whisper](https://github.com/openai/whisper)
 - [Faster Whisper](https://github.com/guillaumekln/faster-whisper)
 - [WebRTC VAD](https://github.com/wiseman/py-webrtcvad)
