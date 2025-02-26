@@ -33,22 +33,27 @@ class AudioSegmenter:
         # 세그먼트 설정
         self.config = {
             'min_segment_duration': 1.0,       # 최소 세그먼트 길이 (초)
-            'max_segment_duration': 10.0,      # 최대 세그먼트 길이 (초)
+            'max_segment_duration': 10.0,      # 기본 최대 세그먼트 길이 (초)
+            'absolute_max_duration': 15.0,     # 절대 최대 세그먼트 길이 (초) - 새로 추가
             'speech_pad_duration': 0.3,        # 음성 전후 패딩 (초)
             'min_speech_duration': 0.3,        # 최소 음성 인식 길이 (초)
-            'silence_threshold': 0.5,          # 묵음 간주할 임계값 (초)
+            'silence_threshold': 0.3,          # 묵음 간주할 임계값 (초)
             'max_silence_length': 1.5,         # 세그먼트 내 허용 묵음 길이 (초)
             'energy_threshold': 0.001,         # 음성 에너지 임계값
-            'energy_boost_threshold': 0.01     # 에너지 기반 음성 감지 부스트 임계값
+            'energy_boost_threshold': 0.01,    # 에너지 기반 음성 감지 부스트 임계값
+            'adaptive_segmentation': True      # 적응형 세그먼테이션 활성화 - 새로 추가
         }
 
         # 샘플 단위로 변환
         self.min_segment_samples = int(self.config['min_segment_duration'] * sample_rate)
         self.max_segment_samples = int(self.config['max_segment_duration'] * sample_rate)
+        self.absolute_max_samples = int(self.config['absolute_max_duration'] * sample_rate)  # 새로 추가
         self.speech_pad_samples = int(self.config['speech_pad_duration'] * sample_rate)
         self.min_speech_samples = int(self.config['min_speech_duration'] * sample_rate)
+        self.min_speech_frames = int(self.config['min_speech_duration'] * 1000 / self.frame_duration_ms)
         self.silence_threshold_frames = int(self.config['silence_threshold'] * 1000 / self.frame_duration_ms)
         self.max_silence_frames = int(self.config['max_silence_length'] * 1000 / self.frame_duration_ms)
+
 
         # 상태 변수 초기화
         self.reset_state()
@@ -57,13 +62,14 @@ class AudioSegmenter:
         self.logger.log_info(
             f"세그멘터 설정 - 최소 길이: {self.config['min_segment_duration']}초, "
             f"최대 길이: {self.config['max_segment_duration']}초, "
+            f"절대 최대 길이: {self.config['absolute_max_duration']}초, "  # 로그에도 추가
             f"VAD 모드: {self.vad_mode}"
         )
 
     def reset_state(self):
         """상태 변수 초기화"""
         # 버퍼 및 상태 변수
-        self.audio_buffer = collections.deque(maxlen=self.max_segment_samples)
+        self.audio_buffer = collections.deque(maxlen=self.absolute_max_samples)  # 여기를 수정
         self.speech_frames = 0
         self.silence_frames = 0
         self.is_speech_active = False
@@ -172,29 +178,52 @@ class AudioSegmenter:
             # 세그먼트가 없으면 체크할 필요 없음
             if len(self.audio_buffer) < self.min_segment_samples:
                 return None
+                
+                
+            # 음성 비율 계산 (최근 100 프레임)
+            recent_frames = min(len(self.voiced_frames), 100)
+            if recent_frames > 0:
+                recent_voice_ratio = sum(self.voiced_frames[-recent_frames:]) / recent_frames
+            else:
+                recent_voice_ratio = 0
 
-            # 세그먼트 완료 조건들
-
-            # 1. 최대 길이 도달
-            if len(self.audio_buffer) >= self.max_segment_samples:
-                self.logger.log_debug("최대 세그먼트 길이에 도달")
-                return self._finalize_segment("max_length")
-
-            # 2. 충분한 묵음 감지됨 (음성 종료 후)
+            # 디버그 정보 로깅
+            self.logger.log_debug(
+                f"상태 - 음성활성: {self.is_speech_active}, "
+                f"묵음프레임: {self.silence_frames} / {self.max_silence_frames}, "
+                f"음성인식프레임: {self.speech_frames} / {self.min_speech_frames} ,"
+                f"최근음성비율: {recent_voice_ratio:.3f}"
+            )
+    
+            # 1. 발화 종료 후 충분한 묵음 감지 (가장 중요한 조건)
             if (not self.is_speech_active and
-                self.speech_frames > self.min_speech_samples and
+                self.speech_frames > self.min_speech_frames and
                 self.silence_frames > self.max_silence_frames):
                 self.logger.log_info(f"충분한 묵음 감지됨 (묵음 프레임: {self.silence_frames})")
                 return self._finalize_segment("silence")
-
-            # 3. 마지막 음성 감지 후 일정 시간 경과 (타임아웃)
+                
+            # 2. 절대 최대 길이 도달 - 무조건 세그먼트 완료
+            if len(self.audio_buffer) >= self.absolute_max_samples:
+                self.logger.log_debug("절대 최대 세그먼트 길이에 도달")
+                return self._finalize_segment("absolute_max_length")
+                
+            # 3. 기본 최대 길이에 도달했지만 현재 활발한 발화 중인 경우 추가 시간 허용
+            if len(self.audio_buffer) >= self.max_segment_samples:
+                # 현재 활발히 말하고 있는 경우 계속 진행 (절대 최대까지)
+                if self.is_speech_active and self.config.get('adaptive_segmentation', False):
+                    return None
+                    
+                self.logger.log_debug("기본 최대 세그먼트 길이에 도달")
+                return self._finalize_segment("max_length")
+                
+            # 4. 마지막 음성 감지 후 일정 시간 경과 (타임아웃)
             if (self.speech_frames > self.min_speech_samples and
                 time.time() - self.last_voiced_frame_time > self.config['silence_threshold']):
                 self.logger.log_info("음성 감지 타임아웃")
                 return self._finalize_segment("timeout")
-
+    
             return None
-
+            
         except Exception as e:
             self.logger.log_error("segment_check", f"세그먼트 완료 확인 중 오류: {str(e)}")
             return None
@@ -227,7 +256,7 @@ class AudioSegmenter:
                 'timestamp': time.time()
             }
 
-            self.logger.log_debug(
+            self.logger.log_info(
                 f"세그먼트 완료 - 길이: {segment_duration:.2f}초, "
                 f"샘플 수: {len(self.audio_buffer)}, "
                 f"음성 비율: {voiced_ratio:.3f}, "
