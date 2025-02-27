@@ -32,8 +32,8 @@ class RealTimeTranscriber:
         # 기본 설정
         self.config = {
             'model_name': 'medium',            # Whisper 모델 이름
-            'use_faster_whisper': True,          # Faster Whisper 사용 여부
-            'translator_enabled': True,          # 번역 활성화 여부
+            'use_faster_whisper': False,       # Faster Whisper 사용 여부 (기본값: 사용 안함)
+            'translator_enabled': True,         # 번역 활성화 여부
             'translate_to': 'ko',                # 번역 대상 언어
             'save_transcript': True,             # 전사 결과 자동 저장 여부
             'output_dir': 'results',             # 결과 저장 디렉토리
@@ -683,18 +683,18 @@ def check_dependencies():
         return False
 
     # 선택적 라이브러리 확인
-    missing_optional = []
-    for module, package in optional.items():
-        if importlib.util.find_spec(module) is None:
-            missing_optional.append(package)
+    # missing_optional = []
+    # for module, package in optional.items():
+    #     if importlib.util.find_spec(module) is None:
+    #         missing_optional.append(package)
 
-    if missing_optional:
-        print("다음 선택적 라이브러리가 설치되지 않았습니다:")
-        for package in missing_optional:
-            print(f"  - {package}")
-        print("\n선택적 라이브러리 설치 명령어:")
-        print(f"pip install {' '.join(missing_optional)}")
-        print("\n선택적 라이브러리 없이도 기본 기능은 작동합니다.")
+    # if missing_optional:
+    #     print("다음 선택적 라이브러리가 설치되지 않았습니다:")
+    #     for package in missing_optional:
+    #         print(f"  - {package}")
+    #     print("\n선택적 라이브러리 설치 명령어:")
+    #     print(f"pip install {' '.join(missing_optional)}")
+    #     print("\n선택적 라이브러리 없이도 기본 기능은 작동합니다.")
 
     return True
 
@@ -705,8 +705,8 @@ def parse_arguments():
     parser.add_argument('--model', type=str, default='large-v3',
                         help='사용할 Whisper 모델 (tiny, base, small, medium, large-v3 등)')
 
-    parser.add_argument('--no-faster-whisper', action='store_true',
-                        help='Faster Whisper 사용하지 않음 (기본 Whisper 사용)')
+    parser.add_argument('--faster-whisper', action='store_true',
+                        help='Faster Whisper 사용 (기본값: 사용 안함)')
 
     parser.add_argument('--no-translate', action='store_true',
                         help='자동 번역 비활성화')
@@ -731,7 +731,7 @@ def parse_arguments():
     # 인수를 설정 딕셔너리로 변환
     config = {
         'model_name': args.model,
-        'use_faster_whisper': not args.no_faster_whisper,
+        'use_faster_whisper': args.faster_whisper,
         'translator_enabled': not args.no_translate,
         'translate_to': args.translate_to,
         'save_transcript': not args.no_save,
