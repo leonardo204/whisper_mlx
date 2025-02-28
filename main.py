@@ -265,26 +265,26 @@ class RealTimeTranscriber:
             while not self.stop_event.is_set():
                 # 10초마다 간단한 상태 업데이트
                 time.sleep(10)
-    
+
                 if self.stop_event.is_set():
                     break
-    
+
                 # 큐 상태 로깅
                 audio_queue_size = self.audio_queue.qsize()
                 segment_queue_size = self.segment_queue.qsize()
-    
+
                 if audio_queue_size > 20 or segment_queue_size > 5:
                     self.logger.log_warning(
                         f"큐 백로그 발생 - 오디오: {audio_queue_size}, 세그먼트: {segment_queue_size}"
                     )
-    
+
                 self.logger.log_debug(
                     f"상태 - 오디오 큐: {audio_queue_size}, 세그먼트 큐: {segment_queue_size}"
                 )
-                
+
                 # 메모리 모니터링 추가
                 self._monitor_memory_usage()
-    
+
         except Exception as e:
             self.logger.log_error("monitoring", f"모니터링 중 예외 발생: {str(e)}")
 
@@ -293,29 +293,29 @@ class RealTimeTranscriber:
         try:
             import psutil
             import os
-            
+
             process = psutil.Process(os.getpid())
             memory_info = process.memory_info()
-            
+
             # MB 단위로 변환
             rss_mb = memory_info.rss / (1024 * 1024)
             vms_mb = memory_info.vms / (1024 * 1024)
-            
+
             self.logger.log_debug(f"메모리 사용량 - RSS: {rss_mb:.2f}MB, VMS: {vms_mb:.2f}MB")
-            
+
             if rss_mb > 500:  # 500MB 이상 사용 시 경고
                 self.logger.log_warning(f"높은 메모리 사용량 감지: {rss_mb:.2f}MB")
-                
-                
+
+
             # 메모리 사용량이 매우 높으면(4GB 이상) 강제 정리
             if rss_mb > 4000:
                 self.logger.log_warning(f"메모리 사용량이 매우 높습니다. 캐시를 강제로 정리합니다.")
                 self.transcription_manager.transcriber.clear_cache()
                 import gc
                 gc.collect()
-                
+
             return rss_mb, vms_mb
-        
+
         except ImportError:
             self.logger.log_debug("psutil 모듈이 설치되지 않아 메모리 모니터링을 수행할 수 없습니다")
             return 0, 0
@@ -396,7 +396,7 @@ class RealTimeTranscriber:
         print("  - translator_enabled : 번역 기능 활성화/비활성화 (true, false)")
         print("  - save_transcript    : 자동 저장 기능 활성화/비활성화 (true, false)")
         print("exit, quit, q: 프로그램 종료")
-        
+
         print("\n=== 로그 레벨 설정 ===")
         print("set log_level=debug : 상세 로그 출력 (개발 및 디버깅용)")
         print("set log_level=info  : 기본 정보 로그만 출력 (일반 사용)")
@@ -406,15 +406,15 @@ class RealTimeTranscriber:
         try:
             # 전사 통계
             transcription_stats = self.transcription_manager.get_statistics()
-            
+
             # 오디오 처리 통계
             processor_stats = self.processor.get_stats()
-            
+
             print("\n=== 전사 통계 ===")
             print(f"세션 ID: {self.session_id}")
             print(f"세션 시간: {transcription_stats['session_duration']:.1f}초")
             print(f"전사 항목 수: {transcription_stats['total_transcriptions']}")
-            
+
             # Whisper 통계
             whisper_stats = transcription_stats['transcriber']
             if whisper_stats['total_processed'] > 0:
@@ -422,13 +422,13 @@ class RealTimeTranscriber:
                 print(f"처리된 세그먼트: {whisper_stats['total_processed']}")
                 print(f"평균 처리 시간: {whisper_stats['avg_processing_time']:.2f}초")
                 print(f"성공률: {whisper_stats['success_rate']*100:.1f}%")
-                
+
                 # 언어별 통계
                 if whisper_stats['language_counts']:
                     print("\n언어별 통계:")
                     # 자주 사용되는 언어 코드에 대한 간단한 매핑 직접 정의
                     lang_names = {
-                        'ko': '한국어', 
+                        'ko': '한국어',
                         'en': '영어',
                         'ja': '일본어',
                         'zh': '중국어',
@@ -448,24 +448,24 @@ class RealTimeTranscriber:
                         'id': '인도네시아어',
                         'unknown': '알 수 없음'
                     }
-                    
+
                     for lang, count in whisper_stats['language_counts'].items():
                         # 직접 정의한 매핑 사용
                         lang_name = lang_names.get(lang, lang)  # 매핑에 없으면 코드 그대로 사용
                         percentage = count / whisper_stats['total_processed'] * 100
                         print(f"  {lang_name}: {count}개 ({percentage:.1f}%)")
-            
+
             # 오디오 처리 통계
             print(f"\n=== 오디오 처리 통계 ===")
             print(f"처리된 청크: {processor_stats['processed_chunks']}")
             print(f"생성된 세그먼트: {processor_stats['segments_created']}")
             avg_segment_duration = processor_stats['segmenter'].get('avg_segment_duration', 0)
             print(f"평균 세그먼트 길이: {avg_segment_duration:.2f}초")
-            
+
             print("\n큐 상태:")
             print(f"오디오 큐 크기: {self.audio_queue.qsize()}")
             print(f"세그먼트 큐 크기: {self.segment_queue.qsize()}")
-            
+
         except Exception as e:
             self.logger.log_error("stats_display", f"통계 표시 중 오류: {str(e)}")
             print(f"통계를 가져오는 중 오류가 발생했습니다: {e}")
@@ -578,7 +578,7 @@ class RealTimeTranscriber:
                     'error': logging.ERROR,
                     'critical': logging.CRITICAL
                 }
-                
+
                 if value.lower() in log_levels:
                     self.logger.set_log_level(log_levels[value.lower()])
                     print(f"로그 레벨이 '{value}'로 변경되었습니다.")
@@ -658,8 +658,7 @@ def check_dependencies():
     required = {
         'numpy': 'numpy',
         'pyaudio': 'pyaudio',
-        'webrtcvad': 'webrtcvad',
-        'googletrans': 'googletrans==4.0.0-rc1'
+        'webrtcvad': 'webrtcvad'
     }
 
     # 선택적 라이브러리 (없어도 동작 가능하지만 권장)
