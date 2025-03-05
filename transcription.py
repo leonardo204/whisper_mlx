@@ -46,10 +46,10 @@ class TextProcessor:
         """텍스트 프로세서 초기화"""
         self.logger = LogManager()
         self.logger.log_info("텍스트 프로세서 초기화")
-        
+
         # 최근 처리 텍스트 기록 (중복 검사용)
         self.recent_texts = deque(maxlen=5)
-        
+
         # 정제 패턴
         self.cleanup_patterns = [
             (r'\s+', ' '),                # 연속된 공백 정규화
@@ -60,13 +60,13 @@ class TextProcessor:
             (r'[!]{2,}', '!!'),           # 느낌표 정규화
             (r'[?]{2,}', '??')            # 물음표 정규화
         ]
-        
+
         # 한국어 문장 종결 패턴
         self.ko_sentence_end = r'[.!?~…]\s*$|[다요죠양함임니까까요까봐봐죠네요네죠]\s*$'
-        
+
         # 단어 반복 패턴 (단일 단어 반복)
         self.word_repetition_pattern = r'(\b\w+\b)(\s+\1\b)+'
-        
+
         # 구문 반복 패턴 (2-5단어 구문 반복) - 새로 추가
         self.phrase_repetition_patterns = [
             # 2단어 구문 반복 패턴
@@ -78,7 +78,7 @@ class TextProcessor:
             # 5단어 구문 반복 패턴
             r'(\b\w+\s+\w+\s+\w+\s+\w+\s+\w+\b)(\s+\1\b)+'
         ]
-        
+
         # 한국어 반복 패턴 (2-5어절 구문 반복) - 새로 추가
         self.korean_repetition_patterns = [
             # 2어절 구문 반복
@@ -90,7 +90,7 @@ class TextProcessor:
             # 5어절 구문 반복
             r'([가-힣]+\s+[가-힣]+\s+[가-힣]+\s+[가-힣]+\s+[가-힣]+)(\s+\1)+'
         ]
-        
+
         self.logger.log_info("텍스트 프로세서가 초기화되었습니다")
 
     def process_text(self, text: str) -> Optional[str]:
@@ -98,37 +98,37 @@ class TextProcessor:
         try:
             if not text or not text.strip():
                 return None
-                
+
             # 기본 정제
             processed = text.strip()
-            
+
             # 정규화 패턴 적용
             for pattern, replacement in self.cleanup_patterns:
                 processed = re.sub(pattern, replacement, processed)
-                
+
             # 단일 단어 반복 제거
             processed = re.sub(self.word_repetition_pattern, r'\1', processed)
-            
+
             # 영어 구문 반복 제거
             for pattern in self.phrase_repetition_patterns:
                 processed = re.sub(pattern, r'\1', processed)
-                
+
             # 한국어 구문 반복 제거
             for pattern in self.korean_repetition_patterns:
                 processed = re.sub(pattern, r'\1', processed)
-                
+
             # 한국어 반복 구문 추가 검사 (정규식으로 감지하기 어려운 경우)
             processed = self._remove_korean_repetitions(processed)
-            
+
             # 이전 텍스트와 유사도 확인 (중복 방지)
             if self._is_duplicate(processed):
                 self.logger.log_debug(f"중복 텍스트 감지됨: {processed}")
                 return None
-                
+
             # 결과 저장 및 반환
             self.recent_texts.append(processed)
             return processed
-            
+
         except Exception as e:
             self.logger.log_error("text_processing", f"텍스트 처리 중 오류: {str(e)}")
             return text  # 오류 시 원본 반환
@@ -139,49 +139,49 @@ class TextProcessor:
             words = text.split()
             if len(words) < 6:  # 적은 단어 수는 처리 불필요
                 return text
-                
+
             # 반복 윈도우 크기 (2-6어절)
             for window_size in range(2, 7):
                 if len(words) < window_size * 2:  # 윈도우 크기의 2배 이상 단어가 있어야 함
                     continue
-                    
+
                 i = 0
                 result = []
                 skip_to = -1
-                
+
                 while i < len(words):
                     if i < skip_to:
                         i += 1
                         continue
-                        
+
                     # 현재 위치에서 윈도우 크기만큼의 단어들
                     curr_window = words[i:i+window_size]
-                    
+
                     # 반복 감지
                     repetition_found = False
                     for j in range(i + window_size, len(words) - window_size + 1, window_size):
                         next_window = words[j:j+window_size]
-                        
+
                         # 윈도우가 동일한지 확인
                         if curr_window == next_window:
                             if not repetition_found:  # 첫 번째 윈도우는 저장
                                 result.extend(curr_window)
                                 repetition_found = True
-                            
+
                             skip_to = j + window_size  # 반복된 부분 건너뛰기
                         else:
                             break
-                            
+
                     if not repetition_found:
                         result.append(words[i])
                         i += 1
                     else:
                         i = skip_to
-                
+
                 words = result  # 다음 윈도우 크기 처리를 위해 결과 업데이트
-                
+
             return ' '.join(words)
-            
+
         except Exception as e:
             self.logger.log_error("korean_repetition", f"한국어 반복 구문 처리 중 오류: {str(e)}")
             return text  # 오류 시 원본 반환
@@ -258,14 +258,14 @@ class WhisperTranscriber:
         """Whisper 전사기 초기화"""
         self.logger = LogManager()
         self.logger.log_info(f"Whisper 전사기 초기화 (모델: {model_name})")
-    
+
         self.model_name = model_name
         self.use_faster_whisper = use_faster_whisper
         self.translator_enabled = translator_enabled
         self.translate_to = translate_to
-    
+
         self.text_processor = TextProcessor()
-    
+
         # 번역기 초기화 (옵션)
         self.translator = None
         if self.translator_enabled:
@@ -274,18 +274,18 @@ class WhisperTranscriber:
                 self.logger.log_info("Google 번역기가 초기화되었습니다")
             except Exception as e:
                 self.logger.log_error("translator_init", f"번역기 초기화 중 오류: {str(e)}")
-    
+
         # Whisper 모델 초기화
         self.model = None
         self._init_model()
-    
+
         # 캐시 관리 개선
         self.cache = {}  # 동일 오디오에 대한 결과 캐싱
         self.cache_timestamps = {}  # 각 캐시 항목의 마지막 사용 시간
         self.max_cache_size = 50  # 더 작은 캐시 크기
         self.cache_memory_limit = 100 * 1024 * 1024  # 100MB 메모리 제한
         self.current_cache_memory = 0  # 현재 캐시 메모리 사용량
-    
+
         # 통계 변수 초기화
         self.stats = {
             'total_processed': 0,
@@ -295,10 +295,10 @@ class WhisperTranscriber:
             'success_rate': 1.0,
             'cache_evictions': 0
         }
-    
+
         # 스레드 안전성
         self._lock = threading.Lock()
-    
+
         self.logger.log_info("Whisper 전사기가 초기화되었습니다")
 
     def _init_model(self):
@@ -308,7 +308,7 @@ class WhisperTranscriber:
             if self._is_mac_silicon():
                 try:
                     from mlx_whisper import MLXWhisperTranscriber
-                    
+
                     self.logger.log_info("Apple Silicon 감지됨: LightningWhisperMLX 사용")
                     self.model = MLXWhisperTranscriber(model_name=self.model_name)
                     self.use_mlx = True
@@ -318,15 +318,15 @@ class WhisperTranscriber:
                     self.use_mlx = False
             else:
                 self.use_mlx = False
-                
+
             # MLX 사용 실패 시 Faster Whisper 시도
             if self.use_faster_whisper:
                 try:
                     from faster_whisper import WhisperModel
-                    
+
                     # 장치 설정
                     compute_type = "float16"  # 기본 설정
-                    
+
                     # 가능하면 GPU 사용
                     try:
                         import torch
@@ -341,9 +341,9 @@ class WhisperTranscriber:
                         device = "cpu"
                         compute_type = "float32"  # CPU에서는 float32 사용
                         self.logger.log_info("PyTorch가 설치되지 않았습니다. CPU를 사용합니다.")
-                    
+
                     self.logger.log_info(f"계산 타입: {compute_type}")
-                    
+
                     # 모델 로드
                     self.model = WhisperModel(
                         self.model_name,
@@ -351,17 +351,17 @@ class WhisperTranscriber:
                         compute_type=compute_type
                     )
                     self.logger.log_info(f"Faster Whisper 모델 '{self.model_name}'이 로드되었습니다 (장치: {device})")
-                    
+
                 except ImportError:
                     self.logger.log_warning("Faster Whisper를 가져올 수 없습니다. 기본 Whisper로 대체합니다.")
                     self.use_faster_whisper = False
-            
+
             # 기본 Whisper 사용 (다른 모든 옵션 실패 시)
             if not self.use_faster_whisper and not self.use_mlx:
                 import whisper
                 self.model = whisper.load_model(self.model_name)
                 self.logger.log_info(f"Whisper 모델 '{self.model_name}'이 로드되었습니다")
-            
+
         except Exception as e:
             self.logger.log_critical(f"Whisper 모델 초기화 실패: {str(e)}")
             raise RuntimeError(f"Whisper 모델을 초기화할 수 없습니다: {str(e)}")
@@ -378,36 +378,36 @@ class WhisperTranscriber:
     def process_audio(self, segment: Dict) -> Optional[Dict]:
         """
         오디오 세그먼트 전사 처리
-    
+
         Args:
             segment: 오디오 데이터 포함 세그먼트 딕셔너리
-    
+
         Returns:
             전사 결과 딕셔너리 또는 None
         """
         start_time = time.time()
         audio_data = segment.get('audio')
-    
+
         if audio_data is None or len(audio_data) == 0:
             self.logger.log_warning("전사 처리할 오디오 데이터가 없습니다")
             return None
-    
+
         # 캐시 키 생성 (오디오 데이터의 해시 - 더 효율적인 방법 사용)
         # 전체 데이터 대신 샘플링된 오디오 데이터의 해시 사용
         sample_rate = 16000  # 기본 샘플링 레이트
         sample_duration = 3  # 초 단위의 샘플링 기간
         sample_size = min(len(audio_data), int(sample_rate * sample_duration))
-        
+
         # 균등하게 분포된 샘플 추출
         if len(audio_data) > sample_size:
             indices = np.linspace(0, len(audio_data)-1, sample_size, dtype=int)
             audio_sample = audio_data[indices]
         else:
             audio_sample = audio_data
-            
+
         # 해시 계산
         cache_key = str(hash(audio_sample.tobytes()))
-    
+
         # 캐시 확인
         with self._lock:
             if cache_key in self.cache:
@@ -416,22 +416,22 @@ class WhisperTranscriber:
                 # 캐시 타임스탬프 업데이트
                 self.cache_timestamps[cache_key] = time.time()
                 return self.cache[cache_key]
-    
+
         # 전사 처리
         try:
             transcription_result = self._transcribe_audio(audio_data)
             if not transcription_result:
                 return None
-    
+
             # 텍스트 후처리
             processed_text = self.text_processor.process_text(transcription_result.get('text', ''))
             if not processed_text:
                 return None
-    
+
             # 번역 (필요시)
             translation_result = None
             detected_language = transcription_result.get('language', 'unknown')
-    
+
             if (self.translator_enabled and
                 detected_language != self.translate_to and
                 detected_language in SUPPORTED_LANGUAGES):
@@ -439,7 +439,7 @@ class WhisperTranscriber:
                     translation_result = self._translate_text(processed_text, detected_language)
                 except Exception as e:
                     self.logger.log_error("translation", f"번역 중 오류: {str(e)}")
-    
+
             # 결과 생성
             processing_time = time.time() - start_time
             result = {
@@ -451,11 +451,11 @@ class WhisperTranscriber:
                 'audio_duration': segment.get('duration', 0),
                 'timestamp': time.time()
             }
-    
+
             # 번역 결과 추가 (있는 경우)
             if translation_result:
                 result['translation'] = translation_result
-    
+
             # 통계 업데이트
             with self._lock:
                 self.stats['total_processed'] += 1
@@ -465,42 +465,42 @@ class WhisperTranscriber:
                     (self.stats['avg_processing_time'] * (self.stats['total_processed'] - 1) +
                      processing_time) / self.stats['total_processed']
                 )
-    
+
                 # 언어별 카운트
                 if detected_language in self.stats['language_counts']:
                     self.stats['language_counts'][detected_language] += 1
                 else:
                     self.stats['language_counts'][detected_language] = 1
-    
+
                 # 캐시 저장 전 메모리 관리
                 self._manage_cache()
-                
+
                 # 캐시 항목 크기 추정 (오디오 데이터 제외)
                 result_size = sys.getsizeof(str(result))
-                
+
                 # 캐시에 저장
                 self.cache[cache_key] = result
                 self.cache_timestamps[cache_key] = time.time()
                 self.current_cache_memory += result_size
-    
+
             print(f"\n")
             self.logger.log_info(
                 f"전사 완료 - 언어: {result['language_name']}, "
                 f"길이: {result['audio_duration']:.2f}초, "
                 f"처리 시간: {processing_time:.2f}초"
             )
-    
+
             return result
-    
+
         except Exception as e:
             self.logger.log_error("transcription", f"전사 중 오류: {str(e)}")
-    
+
             # 실패 통계 업데이트
             with self._lock:
                 self.stats['total_processed'] += 1
                 # 성공률 업데이트 (지수 이동 평균)
                 self.stats['success_rate'] = 0.9 * self.stats['success_rate']
-    
+
             return None
 
     def _manage_cache(self):
@@ -509,20 +509,20 @@ class WhisperTranscriber:
         if len(self.cache) >= self.max_cache_size or self.current_cache_memory >= self.cache_memory_limit:
             # 가장 오래된 항목 찾기
             oldest_key = min(self.cache_timestamps.items(), key=lambda x: x[1])[0]
-            
+
             # 제거할 항목의 크기 추정
             removed_size = sys.getsizeof(str(self.cache[oldest_key]))
-            
+
             # 캐시에서 제거
             del self.cache[oldest_key]
             del self.cache_timestamps[oldest_key]
-            
+
             # 메모리 사용량 업데이트
             self.current_cache_memory = max(0, self.current_cache_memory - removed_size)
-            
+
             # 통계 업데이트
             self.stats['cache_evictions'] += 1
-            
+
             self.logger.log_debug(f"캐시 항목 제거됨 (현재 크기: {len(self.cache)})")
 
     def _transcribe_audio(self, audio_data: np.ndarray) -> Optional[Dict]:
@@ -531,18 +531,18 @@ class WhisperTranscriber:
             # MLX 사용 시 직접 처리
             if hasattr(self, 'use_mlx') and self.use_mlx:
                 result = self.model.transcribe(audio_data)
-                
+
                 # 결과가 없으면 None 반환
                 if not result or not result.get('text'):
                     return None
-                    
+
                 return result
-                
+
             # 임시 파일 사용 (메모리 형식에 따른 문제 방지)
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_file:
                 # float32 -> int16 변환 및 정규화
                 audio_int16 = (audio_data * 32767).astype(np.int16)
-                
+
                 # NumPy 배열을 파일로 저장
                 import wave
                 with wave.open(temp_file.name, 'wb') as wf:
@@ -550,14 +550,14 @@ class WhisperTranscriber:
                     wf.setsampwidth(2)  # 16-bit
                     wf.setframerate(16000)  # 16kHz
                     wf.writeframes(audio_int16.tobytes())
-                
+
                 # Faster Whisper 사용
                 if self.use_faster_whisper:
                     return self._transcribe_with_faster_whisper(temp_file.name)
                 # 일반 Whisper 사용
                 else:
                     return self._transcribe_with_whisper(temp_file.name)
-                
+
         except Exception as e:
             self.logger.log_error("whisper_transcribe", f"Whisper 전사 중 오류: {str(e)}")
             return None
@@ -622,16 +622,16 @@ class WhisperTranscriber:
         """Google Translate로 텍스트 번역"""
         try:
             start_time = time.time()
-            
+
             # source_lang이 'unknown'이면 'auto'로 설정
             src_lang = 'auto' if source_lang == 'unknown' else source_lang
-            
+
             # 지연 초기화 적용 - 필요할 때만 번역기 생성
             translator = GoogleTranslator(source=src_lang, target=self.translate_to)
             translated_text = translator.translate(text)
-            
+
             translation_time = time.time() - start_time
-    
+
             if translated_text:
                 return {
                     'text': translated_text,
@@ -640,7 +640,7 @@ class WhisperTranscriber:
                     'duration': translation_time
                 }
             return None
-    
+
         except Exception as e:
             self.logger.log_error("translation", f"번역 중 오류: {str(e)}")
             return None
@@ -656,7 +656,7 @@ class WhisperTranscriber:
                 if stats_copy['total_processed'] > 0 else 0
             )
             return stats_copy
-    
+
     def _force_gc(self):
         """강제 가비지 컬렉션 수행"""
         try:
@@ -665,7 +665,7 @@ class WhisperTranscriber:
             self.logger.log_debug(f"가비지 컬렉션 수행: {collected}개 객체 정리")
         except Exception as e:
             self.logger.log_error("gc", f"가비지 컬렉션 중 오류: {str(e)}")
-    
+
     def clear_cache(self):
         """캐시 완전 삭제"""
         with self._lock:
@@ -711,7 +711,7 @@ class TranscriptionManager:
 
         # 결과 기록
         self.transcription_history = []  # 최근 전사 결과 기록
-        self.max_history = 100  # 최대 기록 수
+        self.max_history = 1000000  # 최대 기록 수
 
         # 스레드 안전성
         self._lock = threading.Lock()
