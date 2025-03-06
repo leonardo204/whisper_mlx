@@ -17,5 +17,13 @@
   },
   "system": {
     "log_level": "info"
+  },
+  "caption": {
+    "enabled": false,
+    "auto_start": false,
+    "display_duration": 5000,
+    "position": "bottom",
+    "show_translation": true,
+    "font_size": 28
   }
 }

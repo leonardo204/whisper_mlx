@@ -35,6 +35,14 @@ class SettingsManager:
             },
             "system": {
                 "log_level": "info"
+            },
+            "caption": {
+                "enabled": False,               # 자막 기능 활성화 여부
+                "auto_start": False,            # 프로그램 시작 시 자막 오버레이 자동 시작
+                "display_duration": 5000,       # 자막 표시 시간 (ms) - 0은 계속 표시
+                "position": "bottom",           # 자막 위치 (top, middle, bottom)
+                "show_translation": True,       # 번역문 표시 여부
+                "font_size": 28                 # 자막 폰트 크기
             }
         }
         

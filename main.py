@@ -16,6 +16,7 @@ from audio_device import AudioDevice, AudioRecorder
 from audio_processor import AudioProcessor
 from transcription import TranscriptionManager
 from settings import SettingsManager
+from caption_client import CaptionClient
 
 class RealTimeTranscriber:
     """
@@ -57,6 +58,14 @@ class RealTimeTranscriber:
 
         # 사용자 명령 히스토리
         self.command_history = []
+
+        # 자막 클라이언트 초기화
+        self.caption_client = None
+        self.caption_enabled = self.config.get('caption', {}).get('enabled', False)
+        
+        # 자막 자동 시작 설정 확인
+        if self.caption_enabled and self.config.get('caption', {}).get('auto_start', False):
+            self.init_caption_client()
 
         # 세션 정보
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -160,6 +169,121 @@ class RealTimeTranscriber:
             self.logger.log_critical(f"구성 요소 초기화 중 오류 발생: {str(e)}")
             print(f"\n[오류] 초기화 중 문제가 발생했습니다: {e}")
             return False
+
+
+    def init_caption_client(self):
+        """자막 클라이언트 초기화"""
+        if self.caption_client is None:
+            self.logger.log_info("자막 클라이언트를 초기화합니다.")
+            self.caption_client = CaptionClient()
+            
+            # 자막 오버레이 시작
+            if self.caption_client.start_overlay():
+                self.caption_enabled = True
+                self.logger.log_info("자막 오버레이가 시작되었습니다.")
+
+                # 초기 설정 적용
+                caption_settings = self.config.get('caption', {})
+                self.update_caption_settings(caption_settings)
+                
+                # 시작 메시지 표시
+                self.caption_client.set_caption("실시간 음성 인식 자막이 활성화되었습니다.", 3000)
+                return True
+            else:
+                self.logger.log_error("caption_init", "자막 오버레이 시작에 실패했습니다.")
+                self.caption_client = None
+                self.caption_enabled = False
+                return False
+        else:
+            self.logger.log_info("자막 클라이언트가 이미 초기화되어 있습니다.")
+            return True
+    
+    def update_caption_settings(self, settings):
+        """자막 설정 업데이트"""
+        if not self.caption_client or not self.caption_enabled:
+            return False
+            
+        # 설정 변환 (RealTimeTranscriber 설정 -> 자막 오버레이 설정)
+        overlay_settings = {}
+        
+        # 폰트 크기
+        if 'font_size' in settings:
+            if 'font' not in overlay_settings:
+                overlay_settings['font'] = {}
+            overlay_settings['font']['size'] = settings['font_size']
+        
+        # 위치
+        if 'position' in settings:
+            if 'position' not in overlay_settings:
+                overlay_settings['position'] = {}
+            overlay_settings['position']['location'] = settings['position']
+        
+        # 표시 시간
+        if 'display_duration' in settings:
+            if 'display' not in overlay_settings:
+                overlay_settings['display'] = {}
+            overlay_settings['display']['duration'] = settings['display_duration']
+        
+        # 설정 적용
+        if overlay_settings:
+            return self.caption_client.update_settings(overlay_settings)
+        
+        return True
+    
+    def send_caption(self, text, duration=None):
+        """자막 텍스트 전송"""
+        if not self.caption_client or not self.caption_enabled:
+            return False
+            
+        try:
+            return self.caption_client.set_caption(text, duration)
+        except Exception as e:
+            self.logger.log_error("caption_send", f"자막 전송 중 오류: {str(e)}")
+            return False
+    
+    def toggle_caption_display(self):
+        """자막 표시/숨김 토글"""
+        if not self.caption_client:
+            if not self.init_caption_client():
+                return False
+        
+        try:
+            return self.caption_client.toggle_caption()
+        except Exception as e:
+            self.logger.log_error("caption_toggle", f"자막 토글 중 오류: {str(e)}")
+            return False
+    
+    def toggle_caption_enabled(self):
+        """자막 기능 활성화/비활성화 토글"""
+        if self.caption_enabled:
+            # 비활성화
+            if self.caption_client:
+                try:
+                    self.caption_client.hide_caption()
+                    self.caption_enabled = False
+                    self.logger.log_info("자막 기능이 비활성화되었습니다.")
+                    print("자막 기능이 비활성화되었습니다.")
+                    return True
+                except Exception as e:
+                    self.logger.log_error("caption_disable", f"자막 비활성화 중 오류: {str(e)}")
+                    return False
+        else:
+            # 활성화
+            if not self.caption_client:
+                if not self.init_caption_client():
+                    return False
+            
+            try:
+                self.caption_client.show_caption()
+                self.caption_enabled = True
+                self.logger.log_info("자막 기능이 활성화되었습니다.")
+                print("자막 기능이 활성화되었습니다.")
+                return True
+            except Exception as e:
+                self.logger.log_error("caption_enable", f"자막 활성화 중 오류: {str(e)}")
+                return False
+        
+        return True
 
     def start(self):
         """음성 인식 시작"""
@@ -299,9 +423,29 @@ class RealTimeTranscriber:
             # 번역이 포함된 경우
             print(f"[전사완료][{duration:.2f}초][{result['language_name']}] {result['text']}")
             print(f"[번역완료][{result['translation']['duration']:.2f}초][한국어] {result['translation']['text']}\n")
+            
+            # 자막 전송 (번역 포함)
+            if self.caption_enabled and self.caption_client:
+                caption_settings = self.config.get('caption', {})
+                show_translation = caption_settings.get('show_translation', True)
+                display_duration = caption_settings.get('display_duration', 5000)
+                
+                if show_translation:
+                    # 원문과 번역 모두 표시
+                    caption_text = f"{result['text']}\n{result['translation']['text']}"
+                else:
+                    # 원문만 표시
+                    caption_text = result['text']
+                
+                self.send_caption(caption_text, display_duration)
         else:
             # 번역이 없는 경우
             print(f"[전사완료][{duration:.2f}초][{result['language_name']}] {result['text']}\n")
+            
+            # 자막 전송 (원문만)
+            if self.caption_enabled and self.caption_client:
+                display_duration = self.config.get('caption', {}).get('display_duration', 5000)
+                self.send_caption(result['text'], display_duration)
 
     def _monitor_status(self):
         """상태 모니터링 워크플로우"""
@@ -411,6 +555,30 @@ class RealTimeTranscriber:
                 elif user_input.startswith('set '):
                     self._change_config(user_input[4:])
 
+                elif user_input in ('cc on', 'caption on'):
+                    self.toggle_caption_enabled()
+
+                elif user_input in ('cc off', 'caption off'):
+                    if self.caption_enabled:
+                        self.toggle_caption_enabled()
+                    else:
+                        print("자막 기능이 이미 비활성화되어 있습니다.")
+
+                elif user_input in ('cc toggle', 'caption toggle'):
+                    self.toggle_caption_display()
+                    
+                elif user_input.startswith('cc '):
+                    # cc 명령으로 직접 자막 전송
+                    caption_text = user_input[3:].strip()
+                    if caption_text:
+                        if self.caption_client and self.caption_enabled:
+                            self.send_caption(caption_text)
+                            print(f"자막 메시지를 전송했습니다: {caption_text}")
+                        else:
+                            print("자막 기능이 활성화되어 있지 않습니다. 'cc on'으로 활성화하세요.")
+                    else:
+                        print("전송할 자막 텍스트를 입력하세요. 예: cc 안녕하세요")
+
                 else:
                     print(f"알 수 없는 명령: {user_input}")
                     print("'help'를 입력하면 사용 가능한 명령어를 확인할 수 있습니다.")
@@ -432,6 +600,12 @@ class RealTimeTranscriber:
         print("save, export : 현재까지의 전사 결과 저장")
         print("reset, r     : 세션 초기화 (기록 삭제)")
         print("config, c    : 현재 설정 확인")
+        print("\n=== 자막 관련 명령어 ===")
+        print("cc on         : 자막 기능 활성화")
+        print("cc off        : 자막 기능 비활성화")
+        print("cc toggle     : 자막 표시/숨김 토글")
+        print("cc [텍스트]   : 특정 텍스트를 자막으로 표시")
+        print("\n=== 설정 관련 명령어 ===")
         print("set [옵션]   : 설정 변경 (예: set translate_to=en)")
         print("  주요 설정 옵션:")
         print("  - log_level    : 로그 레벨 설정 (debug, info)")
@@ -439,11 +613,12 @@ class RealTimeTranscriber:
         print("  - model_name   : Whisper 모델 변경 (tiny, base, small, medium, large-v3)")
         print("  - translator_enabled : 번역 기능 활성화/비활성화 (true, false)")
         print("  - save_transcript    : 자동 저장 기능 활성화/비활성화 (true, false)")
-        print("exit, quit, q: 프로그램 종료")
-
         print("\n=== 로그 레벨 설정 ===")
         print("set log_level=debug : 상세 로그 출력 (개발 및 디버깅용)")
         print("set log_level=info  : 기본 정보 로그만 출력 (일반 사용)")
+        print("\n=== 프로그램 종료 ===")
+        print("exit, quit, q: 프로그램 종료")
+
 
     def _show_stats(self):
         """통계 정보 표시"""
@@ -682,7 +857,17 @@ class RealTimeTranscriber:
         """리소스 정리"""
         try:
             self.logger.log_info("리소스 정리 중...")
+            
+            # 자막 클라이언트 종료
+            if self.caption_client:
+                try:
+                    self.logger.log_info("자막 클라이언트 종료 중...")
+                    self.caption_client.shutdown()
+                    self.caption_client = None
+                except Exception as e:
+                    self.logger.log_error("caption_cleanup", f"자막 클라이언트 종료 중 오류: {str(e)}")
 
+            # 기존 코드...
             # 자동 저장 (설정된 경우)
             if self.config['save_transcript']:
                 try:
@@ -798,6 +983,18 @@ def parse_arguments():
 
     parser.add_argument('--max-history', type=int, default=None,
                         help='최대 전사 기록 수 (기본값: 1000)')
+
+    # 자막 관련 인수
+    parser.add_argument('--caption', action='store_true',
+                        help='자막 기능 활성화')
+    parser.add_argument('--no-caption', action='store_true',
+                        help='자막 기능 비활성화')
+    parser.add_argument('--caption-position', type=str, choices=['top', 'middle', 'bottom'], default=None,
+                        help='자막 위치 설정 (top, middle, bottom)')
+    parser.add_argument('--caption-duration', type=int, default=None,
+                        help='자막 표시 시간 (ms) - 0은 계속 표시')
+    parser.add_argument('--caption-font-size', type=int, default=None,
+                        help='자막 폰트 크기')
 
     args = parser.parse_args()
 
