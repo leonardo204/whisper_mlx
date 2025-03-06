@@ -692,7 +692,7 @@ class TranscriptionManager:
     - 세션 컨텍스트 유지
     """
     def __init__(self, model_name: str = "large-v3", use_faster_whisper: bool = True,
-                translator_enabled: bool = True, translate_to: str = 'ko'):
+                translator_enabled: bool = True, translate_to: str = 'ko', max_history: int = 1000):
         """전사 관리자 초기화"""
         self.logger = LogManager()
         self.logger.log_info("전사 관리자 초기화")
@@ -711,7 +711,7 @@ class TranscriptionManager:
 
         # 결과 기록
         self.transcription_history = []  # 최근 전사 결과 기록
-        self.max_history = 1000000  # 최대 기록 수
+        self.max_history = 1000  # 최대 기록 수
 
         # 스레드 안전성
         self._lock = threading.Lock()

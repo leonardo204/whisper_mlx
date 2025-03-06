@@ -15,6 +15,7 @@ from logging_utils import LogManager
 from audio_device import AudioDevice, AudioRecorder
 from audio_processor import AudioProcessor
 from transcription import TranscriptionManager
+from settings import SettingsManager
 
 class RealTimeTranscriber:
     """
@@ -29,30 +30,20 @@ class RealTimeTranscriber:
         self.logger = LogManager()
         self.logger.log_info("실시간 음성 인식기를 초기화합니다")
 
-        # 기본 설정
-        self.config = {
-            'model_name': 'medium',            # Whisper 모델 이름
-            'use_faster_whisper': False,       # Faster Whisper 사용 여부 (기본값: 사용 안함)
-            'translator_enabled': True,         # 번역 활성화 여부
-            'translate_to': 'ko',                # 번역 대상 언어
-            'save_transcript': True,             # 전사 결과 자동 저장 여부
-            'output_dir': 'results',             # 결과 저장 디렉토리
-            'log_level': 'info',                 # 로그 레벨 (debug/info)
-            'calibration_duration': 3            # 초기 환경 캘리브레이션 시간 (초)
-        }
-
-        # 사용자 설정으로 업데이트
-        if config:
-            self.config.update(config)
+        # 설정 관리자 초기화
+        self.settings_manager = SettingsManager()
+        
+        # 설정 로드
+        self.config = self._load_config(config)
 
         # 로그 레벨 설정
-        if self.config['log_level'] == 'info':
+        if self.config['system']['log_level'] == 'info':
             import logging
             self.logger.set_log_level(logging.INFO)
 
         # 결과 저장 디렉토리 생성
-        if self.config['save_transcript']:
-            os.makedirs(self.config['output_dir'], exist_ok=True)
+        if self.config['output']['save_transcript']:
+            os.makedirs(self.config['output']['output_dir'], exist_ok=True)
 
         # 프로그램 제어용 이벤트
         self.stop_event = threading.Event()
@@ -71,6 +62,54 @@ class RealTimeTranscriber:
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         self.logger.log_info("초기화가 완료되었습니다")
+
+    def _load_config(self, config: Dict = None) -> Dict:
+        """설정 로드 및 병합"""
+        # 설정 관리자에서 설정 가져오기
+        settings = self.settings_manager.get_all()
+        
+        # 명령줄/외부 설정이 있으면 업데이트
+        if config:
+            # 기존 코드 호환성을 위한 변환
+            config_map = {
+                'model_name': ('transcription', 'model_name'),
+                'use_faster_whisper': ('transcription', 'use_faster_whisper'),
+                'translator_enabled': ('translation', 'enabled'),
+                'translate_to': ('translation', 'target_language'),
+                'save_transcript': ('output', 'save_transcript'),
+                'output_dir': ('output', 'output_dir'),
+                'log_level': ('system', 'log_level'),
+                'calibration_duration': ('audio', 'calibration_duration'),
+                'max_history': ('transcription', 'max_history')  # 매핑 추가
+            }
+            
+            # 설정 업데이트
+            for old_key, (section, new_key) in config_map.items():
+                if old_key in config:
+                    self.settings_manager.set(f"{section}.{new_key}", config[old_key], save=False)
+            
+            # 설정 저장
+            self.settings_manager.save_settings()
+        
+
+        # 최종 설정 반환 - 호환성 레이어 추가
+        final_config = self.settings_manager.get_all()
+        
+        # 기존 코드와의 호환성을 위해 평면화된 설정 키도 추가
+        flattened_config = {}
+        for section, section_config in final_config.items():
+            for key, value in section_config.items():
+                flattened_config[key] = value
+        
+        # 기존 키 이름 매핑에 따라 추가
+        for old_key, (section, new_key) in config_map.items():
+            flattened_config[old_key] = final_config[section][new_key]
+        
+        # 새 구조와 평면화된 구조를 모두 포함
+        combined_config = final_config.copy()
+        combined_config.update(flattened_config)
+        
+        return combined_config
 
     def initialize_components(self):
         """모든 구성 요소 초기화"""
@@ -94,12 +133,17 @@ class RealTimeTranscriber:
             # 오디오 프로세서 초기화
             self.processor = AudioProcessor(sample_rate=device_config['sample_rate'])
 
+            # max_history 설정 가져오기 (호환성 레이어 활용)
+            max_history = self.config.get('max_history', 
+                                        self.config.get('transcription', {}).get('max_history', 1000))
+
             # 전사 관리자 초기화
             self.transcription_manager = TranscriptionManager(
-                model_name=self.config['model_name'],
-                use_faster_whisper=self.config['use_faster_whisper'],
-                translator_enabled=self.config['translator_enabled'],
-                translate_to=self.config['translate_to']
+                model_name=self.config['transcription']['model_name'],
+                use_faster_whisper=self.config['transcription']['use_faster_whisper'],
+                translator_enabled=self.config['translation']['enabled'],
+                translate_to=self.config['translation']['target_language'],
+                max_history=max_history  # max_history 설정 전달
             )
 
             # 초기화 성공
@@ -532,8 +576,13 @@ class RealTimeTranscriber:
     def _show_config(self):
         """현재 설정 표시"""
         print("\n=== 현재 설정 ===")
-        for key, value in self.config.items():
-            print(f"{key}: {value}")
+        
+        # 설정 구조화하여 표시
+        config = self.settings_manager.get_all()
+        for section, settings in config.items():
+            print(f"\n[{section}]")
+            for key, value in settings.items():
+                print(f"{key}: {value}")
 
     def _change_config(self, config_str: str):
         """설정 변경"""
@@ -546,16 +595,31 @@ class RealTimeTranscriber:
             key, value = config_str.split('=', 1)
             key = key.strip()
             value = value.strip()
-
-            # 설정 키 확인
-            if key not in self.config:
+            
+            # 점 표기법을 사용하여 설정 경로 매핑
+            key_mapping = {
+                'model_name': 'transcription.model_name',
+                'use_faster_whisper': 'transcription.use_faster_whisper',
+                'translator_enabled': 'translation.enabled',
+                'translate_to': 'translation.target_language',
+                'save_transcript': 'output.save_transcript',
+                'output_dir': 'output.output_dir',
+                'log_level': 'system.log_level',
+                'calibration_duration': 'audio.calibration_duration'
+            }
+            
+            # 매핑된 설정 키 찾기
+            setting_key = key_mapping.get(key, key)  # 매핑 없으면 원래 키 사용
+            
+            # 현재 값 가져오기
+            current_value = self.settings_manager.get(setting_key)
+            if current_value is None and '.' not in setting_key:
                 print(f"알 수 없는 설정 키: {key}")
-                print(f"사용 가능한 키: {', '.join(self.config.keys())}")
+                print(f"사용 가능한 키: {', '.join(key_mapping.keys())}")
                 return
-
+            
             # 타입에 맞게 변환
-            old_value = self.config[key]
-            if isinstance(old_value, bool):
+            if isinstance(current_value, bool):
                 if value.lower() in ('true', 'yes', 'y', '1'):
                     value = True
                 elif value.lower() in ('false', 'no', 'n', '0'):
@@ -563,11 +627,11 @@ class RealTimeTranscriber:
                 else:
                     print(f"잘못된 불리언 값: {value}")
                     return
-            elif isinstance(old_value, int):
+            elif isinstance(current_value, int):
                 value = int(value)
-            elif isinstance(old_value, float):
+            elif isinstance(current_value, float):
                 value = float(value)
-
+            
             # 특별한 설정 처리
             if key == 'log_level':
                 import logging
@@ -594,12 +658,16 @@ class RealTimeTranscriber:
                     print(f"지원되는 코드: {supported}")
                     return
                 self.transcription_manager.transcriber.set_translate_language(value)
-
+            
             # 설정 업데이트
-            self.config[key] = value
+            self.settings_manager.set(setting_key, value)
+            
+            # 내부 config 업데이트
+            self.config = self.settings_manager.get_all()
+            
             print(f"설정이 변경되었습니다: {key} = {value}")
             self.logger.log_info(f"설정 변경: {key} = {value}")
-
+            
         except Exception as e:
             self.logger.log_error("config_change", f"설정 변경 중 오류: {str(e)}")
             print(f"설정 변경 중 오류가 발생했습니다: {e}")
@@ -701,7 +769,7 @@ def parse_arguments():
     """명령줄 인수 파싱"""
     parser = argparse.ArgumentParser(description='실시간 음성 인식 및 전사 프로그램')
 
-    parser.add_argument('--model', type=str, default='large-v3',
+    parser.add_argument('--model', type=str, default=None,
                         help='사용할 Whisper 모델 (tiny, base, small, medium, large-v3 등)')
 
     parser.add_argument('--faster-whisper', action='store_true',
@@ -710,44 +778,37 @@ def parse_arguments():
     parser.add_argument('--no-translate', action='store_true',
                         help='자동 번역 비활성화')
 
-    parser.add_argument('--translate-to', type=str, default='ko',
+    parser.add_argument('--translate-to', type=str, default=None,
                         help='번역 대상 언어 코드 (기본값: ko)')
 
     parser.add_argument('--no-save', action='store_true',
                         help='자동 저장 비활성화')
 
-    parser.add_argument('--output-dir', type=str, default='results',
+    parser.add_argument('--output-dir', type=str, default=None,
                         help='출력 디렉토리 경로 (기본값: results)')
 
     parser.add_argument('--debug', action='store_true',
                         help='디버그 로그 활성화')
 
-    parser.add_argument('--config', type=str,
-                        help='설정 파일 경로 (JSON)')
+    parser.add_argument('--config', type=str, default='settings.json',
+                        help='설정 파일 경로 (기본값: settings.json)')
+    
+    parser.add_argument('--calibration-duration', type=int, default=None,
+                        help='초기 환경 캘리브레이션 시간 (초)')
+
+    parser.add_argument('--max-history', type=int, default=None,
+                        help='최대 전사 기록 수 (기본값: 1000)')
 
     args = parser.parse_args()
 
-    # 인수를 설정 딕셔너리로 변환
-    config = {
-        'model_name': args.model,
-        'use_faster_whisper': args.faster_whisper,
-        'translator_enabled': not args.no_translate,
-        'translate_to': args.translate_to,
-        'save_transcript': not args.no_save,
-        'output_dir': args.output_dir,
-        'log_level': 'debug' if args.debug else 'info'
-    }
-
-    # 설정 파일이 제공된 경우 로드 및 병합
-    if args.config:
-        try:
-            with open(args.config, 'r', encoding='utf-8') as f:
-                file_config = json.load(f)
-                config.update(file_config)
-        except Exception as e:
-            print(f"설정 파일 로드 중 오류: {e}")
-
-    return config
+    # 설정 관리자 초기화 (지정된 설정 파일 사용)
+    settings_manager = SettingsManager(args.config)
+    
+    # 명령줄 인수로 설정 업데이트
+    settings_manager.update_from_args(vars(args))
+    
+    # 설정 반환
+    return settings_manager.get_all()
 
 
 def main():
@@ -758,18 +819,19 @@ def main():
     if not check_dependencies():
         sys.exit(1)
 
-    # 인수 파싱
+    # 인수 파싱 및 설정 로드
     config = parse_arguments()
 
     # 우선 사용자 정보 출력
     print("\n=== 실시간 음성 인식 및 전사 ===")
-    print(f"모델: {config['model_name']}")
-    print(f"Faster Whisper: {'사용' if config['use_faster_whisper'] else '사용 안 함'}")
-    print(f"자동 번역: {'활성화' if config['translator_enabled'] else '비활성화'}")
-    if config['translator_enabled']:
+    print(f"모델: {config['transcription']['model_name']}")
+    print(f"Faster Whisper: {'사용' if config['transcription']['use_faster_whisper'] else '사용 안 함'}")
+    print(f"자동 번역: {'활성화' if config['translation']['enabled'] else '비활성화'}")
+    if config['translation']['enabled']:
         from transcription import SUPPORTED_LANGUAGES
-        lang_name = SUPPORTED_LANGUAGES.get(config['translate_to'], config['translate_to'])
-        print(f"번역 대상 언어: {lang_name} ({config['translate_to']})")
+        lang_name = SUPPORTED_LANGUAGES.get(config['translation']['target_language'], 
+                                           config['translation']['target_language'])
+        print(f"번역 대상 언어: {lang_name} ({config['translation']['target_language']})")
 
     # 프로그램 시작
     transcriber = RealTimeTranscriber(config)

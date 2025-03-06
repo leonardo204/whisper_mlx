@@ -1,0 +1,21 @@
+{
+  "audio": {
+    "calibration_duration": 3
+  },
+  "transcription": {
+    "model_name": "large-v3",
+    "use_faster_whisper": false,
+    "max_history": 1000
+  },
+  "translation": {
+    "enabled": true,
+    "target_language": "ko"
+  },
+  "output": {
+    "save_transcript": true,
+    "output_dir": "results"
+  },
+  "system": {
+    "log_level": "info"
+  }
+}
