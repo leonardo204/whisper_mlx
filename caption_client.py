@@ -40,7 +40,7 @@ class CaptionClient:
         # 클라이언트 종료 시 자막 프로세스도 종료하도록 등록
         atexit.register(self.shutdown)
     
-    def start_overlay(self, settings=None, wait_for_server=2.0):
+    def start_overlay(self, settings=None, wait_for_server=1.0):
         """자막 오버레이 프로세스 시작"""
         if self.is_overlay_running():
             logger.info("자막 오버레이가 이미 실행 중입니다.")
@@ -83,8 +83,8 @@ class CaptionClient:
             logger.exception(f"자막 오버레이 시작 중 오류 발생: {str(e)}")
             return False
     
-    def connect(self, max_attempts=5, retry_delay=1.0):
-        """자막 오버레이에 연결"""
+    def connect(self, max_attempts=1, retry_delay=1.0):
+        """자막 오버레이에 연결 (개선된 버전)"""
         if self.connected and self.socket:
             logger.info("이미 자막 오버레이에 연결되어 있습니다.")
             return True
@@ -95,14 +95,15 @@ class CaptionClient:
         for attempt in range(max_attempts):
             try:
                 self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.socket.settimeout(2.0)  # 연결 타임아웃
+                self.socket.settimeout(5.0)  # 연결 타임아웃 증가
                 self.socket.connect((self.host, self.port))
                 self.connected = True
                 
                 # 응답 읽기 스레드 시작
-                self.reader_thread = threading.Thread(target=self._read_responses)
-                self.reader_thread.daemon = True
-                self.reader_thread.start()
+                if self.reader_thread is None or not self.reader_thread.is_alive():
+                    self.reader_thread = threading.Thread(target=self._read_responses)
+                    self.reader_thread.daemon = True
+                    self.reader_thread.start()
                 
                 logger.info(f"자막 오버레이에 연결되었습니다.")
                 return True
@@ -303,24 +304,127 @@ class CaptionClient:
         return {"status": "error", "message": "Timeout waiting for response"}
     
     def set_caption(self, text, duration=None):
-        """자막 텍스트 설정"""
+        """자막 텍스트 설정 (강화된 버전)"""
+        # 텍스트 형식 확인 및 처리
+        if not text:
+            logger.warning("자막 텍스트가 비어 있습니다.")
+            return False
+            
+        # 연결 상태 확인 및 재연결 시도
+        if not self.connected:
+            if not self.connect():
+                # 연결 실패 시 자막 서버 재시작 시도
+                logger.warning("자막 서버 연결 실패, 서버 재시작 시도...")
+                if self.start_overlay(wait_for_server=1.0):
+                    logger.info("자막 서버 재시작 성공")
+                else:
+                    logger.error("자막 서버 재시작 실패")
+                    return False
+        
+        # 메시지 전송
         message = {"text": text}
         if duration is not None:
             message["duration"] = duration
         
-        if not self._send_message(message):
-            logger.warning("자막 텍스트 설정에 실패했습니다.")
+        try:
+            # 먼저 화면 지우기 명령 전송
+            clear_message = {"clear": True}
+            self._send_message(clear_message)
+            
+            # 잠시 대기 (화면 지우기 처리 시간)
+            time.sleep(0.05)
+            
+            # 자막 메시지 전송
+            if not self._send_message(message):
+                logger.warning("자막 텍스트 설정에 실패했습니다.")
+                return False
+                
+            return True
+        except Exception as e:
+            logger.error(f"자막 설정 중 오류: {str(e)}")
+            self.connected = False  # 연결 상태 갱신
             return False
-        
-        return True
     
     def update_settings(self, settings):
-        """자막 설정 업데이트"""
-        message = {"settings": settings}
+        """자막 설정 업데이트 (수정된 버전)"""
+        # 설정이 딕셔너리인지 확인
+        if not isinstance(settings, dict):
+            logger.warning("유효하지 않은 설정 형식입니다.")
+            return False
+        
+        # 설정 변환 (확장된 매핑)
+        expanded_settings = {}
+        
+        # 폰트 설정
+        if 'font_size' in settings:
+            if 'font' not in expanded_settings:
+                expanded_settings['font'] = {}
+            expanded_settings['font']['size'] = settings['font_size']
+        
+        if 'font_family' in settings:
+            if 'font' not in expanded_settings:
+                expanded_settings['font'] = {}
+            expanded_settings['font']['family'] = settings['font_family']
+        
+        if 'font_bold' in settings:
+            if 'font' not in expanded_settings:
+                expanded_settings['font'] = {}
+            expanded_settings['font']['bold'] = settings['font_bold']
+        
+        # 위치 설정
+        if 'position' in settings:
+            if 'position' not in expanded_settings:
+                expanded_settings['position'] = {}
+            expanded_settings['position']['location'] = settings['position']
+        
+        # 오프셋 설정
+        if 'offset_x' in settings:
+            if 'position' not in expanded_settings:
+                expanded_settings['position'] = {}
+            expanded_settings['position']['offset_x'] = settings['offset_x']
+        
+        if 'offset_y' in settings:
+            if 'position' not in expanded_settings:
+                expanded_settings['position'] = {}
+            expanded_settings['position']['offset_y'] = settings['offset_y']
+        
+        # 표시 시간
+        if 'display_duration' in settings:
+            if 'display' not in expanded_settings:
+                expanded_settings['display'] = {}
+            expanded_settings['display']['duration'] = settings['display_duration']
+        
+        # 색상 설정
+        if 'text_color' in settings:
+            if 'color' not in expanded_settings:
+                expanded_settings['color'] = {}
+            expanded_settings['color']['text'] = settings['text_color']
+        
+        if 'background_color' in settings:
+            if 'color' not in expanded_settings:
+                expanded_settings['color'] = {}
+            expanded_settings['color']['background'] = settings['background_color']
+        
+        # 번역 설정
+        if 'show_translation' in settings:
+            if 'translation' not in expanded_settings:
+                expanded_settings['translation'] = {}
+            expanded_settings['translation']['enabled'] = settings['show_translation']
+        
+        # 원본 설정도 병합
+        for key, value in settings.items():
+            if isinstance(value, dict):
+                if key not in expanded_settings:
+                    expanded_settings[key] = {}
+                expanded_settings[key].update(value)
+        
+        # 자막 오버레이에 설정 전송
+        message = {"settings": expanded_settings}
         if not self._send_message(message):
             logger.warning("자막 설정 업데이트에 실패했습니다.")
             return False
         
+        logger.info(f"자막 설정이 업데이트되었습니다: {expanded_settings}")
         return True
     
     def show_caption(self):

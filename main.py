@@ -172,25 +172,31 @@ class RealTimeTranscriber:
 
 
     def init_caption_client(self):
-        """자막 클라이언트 초기화"""
+        """자막 클라이언트 초기화 (개선됨)"""
         if self.caption_client is None:
             self.logger.log_info("자막 클라이언트를 초기화합니다.")
-            self.caption_client = CaptionClient()
-            
-            # 자막 오버레이 시작
-            if self.caption_client.start_overlay():
-                self.caption_enabled = True
-                self.logger.log_info("자막 오버레이가 시작되었습니다.")
-
-                # 초기 설정 적용
-                caption_settings = self.config.get('caption', {})
-                self.update_caption_settings(caption_settings)
+            try:
+                self.caption_client = CaptionClient()
                 
-                # 시작 메시지 표시
-                self.caption_client.set_caption("실시간 음성 인식 자막이 활성화되었습니다.", 3000)
-                return True
-            else:
-                self.logger.log_error("caption_init", "자막 오버레이 시작에 실패했습니다.")
+                # 자막 오버레이 시작
+                if self.caption_client.start_overlay(wait_for_server=1.0):  # 대기 시간 증가
+                    self.caption_enabled = True
+                    self.logger.log_info("자막 오버레이가 시작되었습니다.")
+
+                    # 초기 설정 적용
+                    caption_settings = self.config.get('caption', {})
+                    self.update_caption_settings(caption_settings)
+                    
+                    # 시작 메시지 표시
+                    self.caption_client.set_caption("실시간 음성 인식 자막이 활성화되었습니다.", 3000)
+                    return True
+                else:
+                    self.logger.log_error("caption_init", "자막 오버레이 시작에 실패했습니다.")
+                    self.caption_client = None
+                    self.caption_enabled = False
+                    return False
+            except Exception as e:
+                self.logger.log_error("caption_init", f"자막 초기화 중 오류: {str(e)}")
                 self.caption_client = None
                 self.caption_enabled = False
                 return False
@@ -199,7 +205,7 @@ class RealTimeTranscriber:
             return True
     
     def update_caption_settings(self, settings):
-        """자막 설정 업데이트"""
+        """자막 설정 업데이트 (개선된 버전)"""
         if not self.caption_client or not self.caption_enabled:
             return False
             
@@ -223,6 +229,24 @@ class RealTimeTranscriber:
             if 'display' not in overlay_settings:
                 overlay_settings['display'] = {}
             overlay_settings['display']['duration'] = settings['display_duration']
+        
+        # 번역 설정
+        if 'show_translation' in settings:
+            if 'translation' not in overlay_settings:
+                overlay_settings['translation'] = {}
+            overlay_settings['translation']['enabled'] = settings['show_translation']
+        
+        # 수정된 설정을 메인 설정에 반영 (설정 동기화)
+        caption_config = self.config.get('caption', {})
+        for key, value in settings.items():
+            caption_config[key] = value
+        
+        # 다음 번 실행을 위해 설정 매니저 업데이트
+        if hasattr(self, 'settings_manager'):
+            for key, value in settings.items():
+                self.settings_manager.set(f"caption.{key}", value, save=False)
+            # 설정 저장
+            self.settings_manager.save_settings()
         
         # 설정 적용
         if overlay_settings:
@@ -415,7 +439,7 @@ class RealTimeTranscriber:
             self.stop_event.set()
 
     def _print_result(self, result: Dict):
-        """전사 결과 출력"""
+        """전사 결과 출력 (개선된 버전)"""
         duration = result['audio_duration']
         process_time = result['duration']
 
@@ -430,9 +454,11 @@ class RealTimeTranscriber:
                 show_translation = caption_settings.get('show_translation', True)
                 display_duration = caption_settings.get('display_duration', 5000)
                 
+                # 변경된 부분: 원본과 번역을 구분하여 전송
                 if show_translation:
-                    # 원문과 번역 모두 표시
-                    caption_text = f"{result['text']}\n{result['translation']['text']}"
+                    # 원본과 번역 모두 전송 (빈 줄로 구분)
+                    # 2줄 줄바꿈으로 구분되면 set_caption 메서드에서 색상을 다르게 처리함
+                    caption_text = f"{result['text']}\n\n{result['translation']['text']}"
                 else:
                     # 원문만 표시
                     caption_text = result['text']

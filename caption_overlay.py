@@ -1,15 +1,24 @@
-import sys
+import os
 import json
-import socket
+import time
+import platform
 import threading
+import queue
+import socket
+import sys
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QLabel, QVBoxLayout, 
                              QWidget, QDesktopWidget, QMenu, QAction, 
                              QSystemTrayIcon, QDialog, QComboBox, QPushButton,
-                             QMenuBar)
-from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QPoint, QSize, QRectF
-from PyQt5.QtGui import QPainter, QColor, QFont, QPainterPath, QPen, QIcon, QKeySequence, QPixmap
-import platform
-import queue
+                             QMenuBar, QActionGroup)  # QActionGroup 추가
+from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QPoint, QSize, QRectF, PYQT_VERSION_STR
+from PyQt5.QtGui import QPainter, QColor, QFont, QPainterPath, QPen, QIcon, QKeySequence, QPixmap, QFontMetrics
+
+
+# 상수 정의 (PyQt5 버전 호환성)
+try:
+    from PyQt5.QtWidgets import QWIDGETSIZE_MAX
+except ImportError:
+    QWIDGETSIZE_MAX = 16777215  # Qt 기본값
 
 # 소켓 서버 클래스 추가
 class CaptionServer:
@@ -55,15 +64,27 @@ class CaptionServer:
             return False
             
     def stop(self):
-        """서버 종료"""
+        """서버 종료 (더 안전하게 개선)"""
+        # 이미 종료된 상태면 아무것도 하지 않음
+        if not self.running:
+            return
+            
         self.running = False
         
         # 프로세스 타이머 중지
-        self.process_timer.stop()
+        if hasattr(self, 'process_timer') and self.process_timer.isActive():
+            self.process_timer.stop()
         
         # 클라이언트 소켓 종료
         if self.client_socket:
             try:
+                # 연결 종료 메시지 전송 시도
+                try:
+                    goodbye_msg = json.dumps({"status": "shutdown", "message": "Server is shutting down"}) + '\n'
+                    self.client_socket.sendall(goodbye_msg.encode('utf-8'))
+                except:
+                    pass
+                    
                 self.client_socket.close()
             except:
                 pass
@@ -149,28 +170,36 @@ class CaptionServer:
                 self.client_socket = None
                 
     def _process_message_queue(self):
-        """
-        메인 스레드에서 메시지 큐 처리
-        이 메서드는 QTimer를 통해 메인 스레드에서 주기적으로 호출됨
-        """
+        """메인 스레드에서 메시지 큐 처리 (견고성 향상)"""
+        if not hasattr(self, 'caption_overlay') or self.caption_overlay is None:
+            return
+            
         try:
             # 큐에 메시지가 있으면 처리
             while not self.message_queue.empty():
-                message, client_socket = self.message_queue.get_nowait()
                 try:
-                    self._process_single_message(message, client_socket)
-                except Exception as e:
-                    self._print_msg(f"메시지 처리 중 오류 발생: {str(e)}")
-                finally:
-                    self.message_queue.task_done()
-        except:
-            # 큐 처리 중 오류 무시
-            pass
+                    message, client_socket = self.message_queue.get_nowait()
+                    try:
+                        self._process_single_message(message, client_socket)
+                    except Exception as e:
+                        self._print_msg(f"메시지 처리 중 오류 발생: {str(e)}")
+                    finally:
+                        self.message_queue.task_done()
+                except queue.Empty:
+                    break
+        except Exception as e:
+            self._print_msg(f"메시지 큐 처리 중 예외 발생: {str(e)}")
     
     def _process_single_message(self, message, client_socket):
-        """단일 메시지 처리 (메인 스레드에서 호출)"""
+        """단일 메시지 처리 (새 접근법 버전)"""
         try:
             data = json.loads(message)
+            
+            # clear 명령 처리 (추가된 부분)
+            if 'clear' in data and data['clear']:
+                self.caption_overlay.clear_screen()
+                self._print_msg("화면 지우기 명령을 받았습니다.")
+                return self._send_response({"status": "ok", "message": "Screen cleared"}, client_socket)
             
             # 명령어 처리
             if 'command' in data:
@@ -190,13 +219,29 @@ class CaptionServer:
                     self._print_msg("자막 숨기기 명령을 받았습니다.")
                     return self._send_response({"status": "ok", "message": "Caption hidden"}, client_socket)
                     
+                elif command == 'force_clear':
+                    # 강제 화면 초기화
+                    self.caption_overlay.force_clear_and_update()
+                    self._print_msg("강제 화면 초기화 명령을 받았습니다.")
+                    return self._send_response({"status": "ok", "message": "Screen forcibly cleared"}, client_socket)
+
                 elif command == 'status':
                     # 상태 반환
                     status = "visible" if self.caption_overlay.visible else "hidden"
-                    self._print_msg(f"상태 요청 - 현재 자막: {status}")
+                    
+                    # 현재 설정 상태도 함께 반환
+                    current_settings = {
+                        "position": self.caption_overlay.settings["position"]["location"],
+                        "font_size": self.caption_overlay.settings["font"]["size"],
+                        "display_duration": self.caption_overlay.settings["display"]["duration"],
+                        "translation_enabled": self.caption_overlay.settings.get("translation", {}).get("enabled", True)
+                    }
+                    
+                    self._print_msg(f"상태 요청 - 현재 자막: {status}, 설정: {current_settings}")
                     return self._send_response({
                         "status": "ok", 
-                        "caption_visible": self.caption_overlay.visible
+                        "caption_visible": self.caption_overlay.visible,
+                        "settings": current_settings
                     }, client_socket)
                     
                 elif command == 'exit':
@@ -218,11 +263,57 @@ class CaptionServer:
                 text = data['text']
                 duration = data.get('duration', None)
                 self.caption_overlay.set_caption(text, duration)
+                
+                # 로그에 자막 내용 요약 표시 (너무 길면 잘라서 표시)
+                if len(text) > 50:
+                    summary = text[:47] + "..."
+                else:
+                    summary = text
+                    
+                self._print_msg(f"자막 텍스트 수신: {summary}")
                 return self._send_response({"status": "ok", "message": "Caption set"}, client_socket)
                 
             # 설정 업데이트
             if 'settings' in data:
+                # 설정 업데이트 전에 주요 설정 값 백업 (로깅용)
+                old_settings = {}
+                if 'font' in data['settings'] and 'size' in data['settings']['font']:
+                    old_settings['font_size'] = self.caption_overlay.settings['font']['size']
+                    
+                if 'position' in data['settings'] and 'location' in data['settings']['position']:
+                    old_settings['position'] = self.caption_overlay.settings['position']['location']
+                    
+                if 'display' in data['settings'] and 'duration' in data['settings']['display']:
+                    old_settings['duration'] = self.caption_overlay.settings['display']['duration']
+                
+                # 설정 업데이트 실행
                 self.caption_overlay.update_settings(data['settings'])
+                
+                # 설정 변경 로그 출력
+                changes = []
+                for key, old_value in old_settings.items():
+                    if key == 'font_size' and 'font' in data['settings'] and 'size' in data['settings']['font']:
+                        new_value = data['settings']['font']['size']
+                        if old_value != new_value:
+                            changes.append(f"글꼴 크기: {old_value}pt -> {new_value}pt")
+                            
+                    elif key == 'position' and 'position' in data['settings'] and 'location' in data['settings']['position']:
+                        new_value = data['settings']['position']['location']
+                        if old_value != new_value:
+                            changes.append(f"위치: {old_value} -> {new_value}")
+                            
+                    elif key == 'duration' and 'display' in data['settings'] and 'duration' in data['settings']['display']:
+                        new_value = data['settings']['display']['duration']
+                        if old_value != new_value:
+                            old_text = "계속 표시" if old_value == 0 else f"{old_value//1000}초"
+                            new_text = "계속 표시" if new_value == 0 else f"{new_value//1000}초"
+                            changes.append(f"표시 시간: {old_text} -> {new_text}")
+                
+                if changes:
+                    self._print_msg(f"설정 업데이트 - 변경사항: {', '.join(changes)}")
+                else:
+                    self._print_msg("설정 업데이트 - 변경사항 없음")
+                    
                 return self._send_response({"status": "ok", "message": "Settings updated"}, client_socket)
                 
         except json.JSONDecodeError:
@@ -232,7 +323,7 @@ class CaptionServer:
         except Exception as e:
             self._print_msg(f"메시지 처리 중 오류 발생: {str(e)}")
             return self._send_response({"status": "error", "message": str(e)}, client_socket)
-            
+
     def _send_response(self, response, client_socket):
         """응답 전송"""
         if not client_socket:
@@ -258,6 +349,9 @@ class MonitorSelectDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("모니터 선택")
         self.setFixedSize(300, 150)
+        
+        # 항상 위에 표시 설정
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         
         # 레이아웃 설정
         layout = QVBoxLayout(self)
@@ -303,7 +397,7 @@ class CaptionOverlay(QMainWindow):
     - 사용자 설정 가능한 스타일
     """
     def __init__(self, settings=None):
-        """자막 오버레이 초기화"""
+        """자막 오버레이 초기화 (수정된 버전)"""
         super().__init__()
         
         # Mac OS 확인
@@ -320,7 +414,8 @@ class CaptionOverlay(QMainWindow):
             "color": {
                 "text": "#FFFFFF",  # 흰색
                 "stroke": "#000000",  # 검은색
-                "background": "#66000000"  # 반투명 검은색 (ARGB)
+                "background": "#66000000",  # 반투명 검은색 (ARGB)
+                "translation_text": "#f5cc00"  # 번역 텍스트 색상 - 노란색으로 변경
             },
             "position": {
                 "location": "bottom",  # top, middle, bottom
@@ -339,6 +434,10 @@ class CaptionOverlay(QMainWindow):
                 "duration": 0,  # 자막 표시 시간 (ms) - 0은 '계속 표시'
                 "transition": 500,  # 페이드 효과 시간 (ms)
                 "max_lines": 2     # 최대 표시 줄 수
+            },
+            "translation": {
+                "enabled": True,    # 번역 텍스트 표시 여부
+                "separate_color": True  # 번역 텍스트를 다른 색상으로 표시
             }
         }
         
@@ -349,14 +448,37 @@ class CaptionOverlay(QMainWindow):
         
         # 자막 텍스트 및 상태
         self.current_text = ""
+        self.text_parts = []
+        self.formatted_text_lines = []
         self.history = []  # 최근 자막 기록
         self.max_history = 10
         self.visible = True
+        
+        # QActionGroup 객체들을 저장할 변수 추가
+        self.position_action_group = None
+        self.font_size_action_group = None
+        self.duration_action_group = None
+        self.monitor_action_group = None  # 추가된 부분
+
+        # 로그 디렉토리 생성
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            log_dir = os.path.join(script_dir, "logs")
+            os.makedirs(log_dir, exist_ok=True)
+        except Exception as e:
+            print(f"로그 디렉토리 생성 중 오류: {str(e)}")
         
         # 타이머 설정 (자동 숨김용) - 초기화 순서 변경
         self.hide_timer = QTimer(self)
         self.hide_timer.timeout.connect(self.hide_caption)
         
+        # 잔상 관련 플래그 추가
+        self.clear_needed = False
+        self.last_paint_time = time.time()
+
+        # 더블 버퍼링 설정 (선택적)
+        self.use_double_buffering = False
+
         # UI 초기화
         self.init_ui()
         
@@ -371,6 +493,16 @@ class CaptionOverlay(QMainWindow):
             print(f"트레이 아이콘 생성 중 오류 발생: {e}")
             print("트레이 아이콘 없이 계속 진행합니다.")
         
+        # 투명 윈도우를 위한 추가 설정
+        self.setAttribute(Qt.WA_NoSystemBackground, True)  # 시스템 배경 비활성화
+        self.setAutoFillBackground(False)  # 자동 배경 채우기 비활성화
+
+        # 투명 윈도우 스타일시트 설정
+        self.setStyleSheet("background-color: transparent;")
+        
+        # 잔상 제거를 위한 플래그
+        self.clear_needed = False
+
         # 단축키 설정
         self.setup_shortcuts()
         
@@ -380,7 +512,32 @@ class CaptionOverlay(QMainWindow):
         # 소켓 서버 초기화 및 시작
         self.server = CaptionServer(self)
         self.server.start()
+        
+        # 설정 로드 로그
+        self.log_settings_change("설정 로드", "기본값", "사용자 설정")
     
+    def force_clear_and_update(self):
+        """화면을 강제로 지우고 업데이트"""
+        # 데이터 초기화
+        self.current_text = ""
+        self.text_parts = []
+        self.formatted_text_lines = []
+        self.text_width = 0
+        self.text_height = 0
+        self.bg_width = 0
+        self.bg_height = 0
+        
+        # 화면 지우기
+        self.clear_screen()
+        
+        # 버퍼 재초기화
+        self.initialize_buffer()
+        
+        # 강제 갱신
+        self.update()
+        self.repaint()
+        QApplication.processEvents()
+
     def _get_default_font_family(self):
         """OS에 따른 기본 폰트 가져오기"""
         if platform.system() == 'Darwin':  # macOS
@@ -390,8 +547,9 @@ class CaptionOverlay(QMainWindow):
         else:  # Linux 등
             return "Sans"
     
+
     def create_menu_bar(self):
-        """메뉴바 생성"""
+        """메뉴바 생성 (개선된 버전)"""
         # 메뉴바 설정
         menubar = self.menuBar()
         
@@ -416,22 +574,50 @@ class CaptionOverlay(QMainWindow):
         # 위치 메뉴
         position_menu = view_menu.addMenu('위치')
         
-        top_action = QAction('상단', self)
-        top_action.triggered.connect(lambda: self.change_position('top'))
-        position_menu.addAction(top_action)
+        # 위치 액션 그룹 (라디오 버튼 형태로 동작)
+        self.position_action_group = QActionGroup(self)
+        self.position_action_group.setExclusive(True)
         
-        middle_action = QAction('중앙', self)
-        middle_action.triggered.connect(lambda: self.change_position('middle'))
-        position_menu.addAction(middle_action)
+        # 위치별 액션 생성 및 현재 설정에 맞게 체크 표시
+        positions = [
+            ('top', '상단'),
+            ('middle', '중앙'),
+            ('bottom', '하단')
+        ]
         
-        bottom_action = QAction('하단', self)
-        bottom_action.triggered.connect(lambda: self.change_position('bottom'))
-        position_menu.addAction(bottom_action)
+        for pos_value, pos_text in positions:
+            pos_action = QAction(pos_text, self)
+            pos_action.setCheckable(True)
+            pos_action.setChecked(self.settings["position"]["location"] == pos_value)
+            pos_action.triggered.connect(lambda checked, p=pos_value: self.change_position(p))
+            
+            self.position_action_group.addAction(pos_action)
+            position_menu.addAction(pos_action)
         
-        # 모니터 선택 액션
-        monitor_action = QAction('모니터 선택...', self)
-        monitor_action.triggered.connect(self.select_monitor)
-        view_menu.addAction(monitor_action)
+        # 모니터 선택 메뉴 (수정된 부분: 대화상자에서 선택 메뉴로 변경)
+        monitor_menu = view_menu.addMenu('모니터 선택')
+        
+        # 모니터 액션 그룹 (라디오 버튼 형태로 동작)
+        self.monitor_action_group = QActionGroup(self)
+        self.monitor_action_group.setExclusive(True)
+        
+        # 사용 가능한 모니터 목록 가져오기
+        desktop = QDesktopWidget()
+        current_monitor = self.settings["position"]["monitor"]
+        
+        # 모니터별 액션 생성
+        for i in range(desktop.screenCount()):
+            screen_geometry = desktop.screenGeometry(i)
+            primary = " (주 모니터)" if i == desktop.primaryScreen() else ""
+            monitor_text = f"모니터 {i+1}: {screen_geometry.width()}x{screen_geometry.height()}{primary}"
+            
+            monitor_action = QAction(monitor_text, self)
+            monitor_action.setCheckable(True)
+            monitor_action.setChecked(current_monitor == i)
+            monitor_action.triggered.connect(lambda checked, m=i: self.select_monitor_from_menu(m))
+            
+            self.monitor_action_group.addAction(monitor_action)
+            monitor_menu.addAction(monitor_action)
         
         # 설정 메뉴
         settings_menu = menubar.addMenu('설정')
@@ -439,22 +625,44 @@ class CaptionOverlay(QMainWindow):
         # 글꼴 크기 메뉴
         font_size_menu = settings_menu.addMenu('글꼴 크기')
         
+        # 글꼴 크기 액션 그룹
+        self.font_size_action_group = QActionGroup(self)
+        self.font_size_action_group.setExclusive(True)
+        
         for size in [18, 24, 28, 32, 36]:
             size_action = QAction(f'{size}pt', self)
+            size_action.setCheckable(True)
+            size_action.setChecked(self.settings["font"]["size"] == size)
             size_action.triggered.connect(lambda checked, s=size: self.change_font_size(s))
+            
+            self.font_size_action_group.addAction(size_action)
             font_size_menu.addAction(size_action)
         
         # 표시 시간 메뉴
         duration_menu = settings_menu.addMenu('표시 시간')
         
-        for seconds in [3, 5, 7, 10, 0]:
-            duration_text = f"{seconds}초" if seconds > 0 else "계속 표시"
+        # 표시 시간 액션 그룹
+        self.duration_action_group = QActionGroup(self)
+        self.duration_action_group.setExclusive(True)
+        
+        # 표시 시간 옵션
+        durations = [
+            (3000, "3초"),
+            (5000, "5초"),
+            (7000, "7초"),
+            (10000, "10초"),
+            (0, "계속 표시")
+        ]
+        
+        for duration_ms, duration_text in durations:
             duration_action = QAction(duration_text, self)
             duration_action.setCheckable(True)
-            duration_action.setChecked(self.settings["display"]["duration"] == seconds * 1000)
+            duration_action.setChecked(self.settings["display"]["duration"] == duration_ms)
             duration_action.triggered.connect(
-                lambda checked, s=seconds: self.change_duration(s * 1000)
+                lambda checked, d=duration_ms: self.change_duration(d)
             )
+            
+            self.duration_action_group.addAction(duration_action)
             duration_menu.addAction(duration_action)
         
         # 도움말 메뉴
@@ -473,7 +681,8 @@ class CaptionOverlay(QMainWindow):
             # Windows/Linux에서는 메뉴바를 최소화
             menubar.setStyleSheet("QMenuBar { background-color: rgba(0, 0, 0, 120); color: white; }")
             menubar.setFixedHeight(24)
-    
+
+
     def create_tray_icon(self):
         """시스템 트레이 아이콘 생성"""
         # 트레이 기능 사용 가능한지 확인
@@ -526,11 +735,10 @@ class CaptionOverlay(QMainWindow):
             self.toggle_visibility()
     
     def init_ui(self):
-        """UI 초기화"""
+        """UI 초기화 (더블 버퍼링 지원 추가)"""
         # 창 설정
         flags = Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
         
-        # Mac OS에서는 Qt.Tool 플래그가 약간 다르게 동작할 수 있음
         if not self.is_mac:
             flags |= Qt.Tool
             
@@ -538,31 +746,64 @@ class CaptionOverlay(QMainWindow):
         self.setAttribute(Qt.WA_TranslucentBackground)  # 배경 투명
         self.setAttribute(Qt.WA_ShowWithoutActivating)  # 활성화 없이 표시
         
-        # 중앙 위젯 및 레이아웃
+        # 전체 화면을 덮는 중앙 위젯
         self.central_widget = QWidget(self)
         self.setCentralWidget(self.central_widget)
-        
-        # 자막 라벨
-        self.caption_label = QLabel(self)
-        self.caption_label.setAlignment(Qt.AlignCenter)
-        self.update_label_style()
-        
-        # 레이아웃
-        layout = QVBoxLayout(self.central_widget)
-        layout.addWidget(self.caption_label)
-        layout.setContentsMargins(0, 0, 0, 0)
         
         # 컨텍스트 메뉴 설정
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
         
-        # 초기 크기 설정
-        screen_size = QDesktopWidget().availableGeometry().size()
-        self.resize(int(screen_size.width() * 0.8), 200)
+        # 초기 크기 설정 - 화면 크기에 맞춤
+        self.update_window_size()
         
         # 창 제목 설정
         self.setWindowTitle("자막 오버레이")
+        
+        # 더블 버퍼링을 위한 오프스크린 버퍼 초기화
+        self.buffer = None
+        self.initialize_buffer()
     
+
+    def initialize_buffer(self):
+        """버퍼 초기화 - 불필요한 기능 제거된 버전"""
+        # 더블 버퍼링 사용 여부 플래그
+        self.use_double_buffering = False
+        
+        # 더블 버퍼링이 필요한 경우에만 버퍼 생성
+        if self.use_double_buffering:
+            if hasattr(self, 'buffer') and self.buffer:
+                del self.buffer
+            
+            self.buffer = QPixmap(self.width(), self.height())
+            self.buffer.fill(Qt.transparent)
+
+    def force_complete_clear(self):
+        """완전한 화면 초기화 - 잔상 제거를 위한 강화된 함수"""
+        # 모든 데이터 초기화
+        self.current_text = ""
+        self.text_parts = []
+        self.formatted_text_lines = []
+        self.text_width = 0
+        self.text_height = 0
+        self.bg_width = 0
+        self.bg_height = 0
+        
+        # 화면 지우기 플래그 설정
+        self.clear_needed = True
+        
+        # 화면 갱신 - 여러 번 호출하여 확실하게
+        for _ in range(3):  # 3번 반복하여 잔상 방지 강화
+            self.update()
+            self.repaint()
+            QApplication.processEvents()
+            time.sleep(0.01)  # 짧은 지연 추가
+        
+        # 마지막 화면 갱신
+        self.update()
+        self.repaint()
+        QApplication.processEvents()
+
     def setup_shortcuts(self):
         """단축키 설정"""
         # ESC 키로 종료
@@ -591,28 +832,8 @@ class CaptionOverlay(QMainWindow):
         self.close()
         QApplication.instance().quit()
     
-    def update_label_style(self):
-        """자막 라벨 스타일 업데이트"""
-        # 폰트 설정
-        font = QFont(
-            self.settings["font"]["family"],
-            self.settings["font"]["size"]
-        )
-        font.setBold(self.settings["font"]["bold"])
-        font.setItalic(self.settings["font"]["italic"])
-        self.caption_label.setFont(font)
-        
-        # 스타일시트 설정
-        self.caption_label.setStyleSheet(f"""
-            QLabel {{
-                color: {self.settings["color"]["text"]};
-                background-color: transparent;
-                padding: {self.settings["style"]["background_padding"]}px;
-            }}
-        """)
-    
     def update_position(self):
-        """화면상의 위치 업데이트"""
+        """화면상의 위치 업데이트 (개선된 버전)"""
         desktop = QDesktopWidget()
         monitor_index = self.settings["position"]["monitor"]
         
@@ -630,67 +851,210 @@ class CaptionOverlay(QMainWindow):
         offset_x = self.settings["position"]["offset_x"]
         offset_y = self.settings["position"]["offset_y"]
         
+        # 항상 x 위치는 화면 왼쪽 경계로 설정 (화면 전체 너비 사용)
+        x = screen_rect.x()
+        
+        # y 위치는 설정에 따라 다르게 계산
         if location == "top":
-            x = screen_rect.x() + (screen_rect.width() - window_size.width()) // 2 + offset_x
             y = screen_rect.y() + 50 + offset_y
         elif location == "middle":
-            x = screen_rect.x() + (screen_rect.width() - window_size.width()) // 2 + offset_x
             y = screen_rect.y() + (screen_rect.height() - window_size.height()) // 2 + offset_y
         else:  # bottom (기본값)
-            x = screen_rect.x() + (screen_rect.width() - window_size.width()) // 2 + offset_x
             y = screen_rect.y() + screen_rect.height() - window_size.height() - 100 + offset_y
         
         self.move(x, y)
     
     def paintEvent(self, event):
-        """커스텀 배경 및 테두리 그리기"""
-        if not self.current_text:
-            return
-            
+        """완전히 개선된 페인트 이벤트 - 잔상 제거 중점"""
+        # 페인터 생성
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         
-        # 텍스트 경계 계산
-        text_rect = self.caption_label.contentsRect()
+        # 전체 창 영역
+        window_rect = self.rect()
+        
+        # 항상 전체 윈도우를 투명하게 지우기 (중요!)
+        painter.setCompositionMode(QPainter.CompositionMode_Clear)
+        painter.fillRect(window_rect, Qt.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        
+        # 'clear_needed' 플래그가 설정된 경우 지우기만 하고 종료
+        if self.clear_needed:
+            self.clear_needed = False
+            return
+        
+        # 텍스트가 없으면 그리지 않음
+        if not self.current_text or not self.formatted_text_lines:
+            return
+        
+        # 폰트 설정
+        font = QFont(
+            self.settings["font"]["family"],
+            self.settings["font"]["size"]
+        )
+        font.setBold(self.settings["font"]["bold"])
+        font.setItalic(self.settings["font"]["italic"])
+        painter.setFont(font)
+        
+        # 화면 중앙 계산
+        screen_center_x = self.width() / 2
+        
+        # 위치 계산
+        location = self.settings["position"]["location"]
         padding = self.settings["style"]["background_padding"]
+        offset_y = self.settings["position"]["offset_y"]
+        
+        if location == "top":
+            y_pos = 50 + offset_y
+        elif location == "middle":
+            y_pos = (self.height() - self.bg_height) / 2 + offset_y
+        else:  # bottom (기본값)
+            y_pos = self.height() - self.bg_height - 100 + offset_y
+        
+        # 배경 사각형 위치 계산 (항상 화면 중앙)
+        bg_left = screen_center_x - self.bg_width / 2
+        bg_rect = QRectF(bg_left, y_pos, self.bg_width, self.bg_height)
         
         # 배경 그리기
         bg_color = QColor(self.settings["color"]["background"])
         radius = self.settings["style"]["background_radius"]
         
-        # 배경 경로 설정
         bg_path = QPainterPath()
-        bg_rect = text_rect.adjusted(
-            -padding, -padding, 
-            padding, padding
-        )
-        # QRect를 QRectF로 변환
-        bg_rectf = QRectF(bg_rect)
-        bg_path.addRoundedRect(bg_rectf, radius, radius)
-        
-        # 배경 그리기
+        bg_path.addRoundedRect(bg_rect, radius, radius)
         painter.fillPath(bg_path, bg_color)
+        
+        # 텍스트 그리기 시작 위치
+        text_y = y_pos + padding
+        
+        # 텍스트 색상 설정
+        text_color = QColor(self.settings["color"]["text"])
+        translation_color = QColor(self.settings.get("color", {}).get("translation_text", "#f5cc00"))
+        
+        # 줄 간격
+        line_spacing = int(self.font_metrics.height() * self.settings["style"]["line_spacing"])
+        
+        # 텍스트 그리기
+        for i, lines in enumerate(self.formatted_text_lines):
+            # 원본과 번역 텍스트 색상 구분
+            if i == 0:
+                painter.setPen(text_color)
+            else:
+                painter.setPen(translation_color)
+            
+            for line in lines:
+                # 각 줄을 개별적으로 중앙 정렬
+                line_width = self.font_metrics.horizontalAdvance(line)
+                line_x = screen_center_x - line_width / 2
+                
+                # 텍스트 그리기
+                painter.drawText(int(line_x), int(text_y + self.font_metrics.ascent()), line)
+                text_y += line_spacing
+            
+            # 원본과 번역 사이 간격
+            if i < len(self.formatted_text_lines) - 1:
+                text_y += line_spacing / 2  # 절반의 추가 간격
+    
+    def format_caption_text(self, text, max_chars_per_line=60):
+        """
+        자막 텍스트를 포맷팅하여 자동 줄바꿈 처리 (개선된 버전)
+        
+        Args:
+            text (str): 원본 텍스트
+            max_chars_per_line (int): 한 줄의 최대 글자 수
+            
+        Returns:
+            str: 줄바꿈이 적용된 텍스트
+        """
+        if not text:
+            return ""
+        
+        # HTML 태그 처리 (텍스트에 HTML 태그가 있는 경우 보존)
+        has_html = any(tag in text for tag in ['<div>', '<span>', '<p>', '<br'])
+        if has_html:
+            return text  # 이미 HTML 태그가 있으면 그대로 반환
+        
+        # 기존에 줄바꿈이 있는 경우 각 줄을 처리
+        lines = text.split('\n')
+        formatted_lines = []
+        
+        for line in lines:
+            if len(line) <= max_chars_per_line:
+                formatted_lines.append(line)
+            else:
+                # 공백 기준으로 단어 분리
+                words = line.split(' ')
+                current_line = ""
+                
+                for word in words:
+                    # 현재 단어를 추가해도 최대 길이를 초과하지 않는 경우
+                    if len(current_line) + len(word) + 1 <= max_chars_per_line:
+                        if current_line:
+                            current_line += " " + word
+                        else:
+                            current_line = word
+                    else:
+                        # 현재 줄이 비어있고 단어가 최대 길이보다 긴 경우 (긴 URL 등)
+                        if not current_line and len(word) > max_chars_per_line:
+                            # 최대 길이 기준으로 강제 분할
+                            chunk_size = max_chars_per_line
+                            for i in range(0, len(word), chunk_size):
+                                chunk = word[i:i + chunk_size]
+                                formatted_lines.append(chunk)
+                        else:
+                            # 현재 줄을 추가하고 새 줄 시작
+                            formatted_lines.append(current_line)
+                            current_line = word
+                
+                # 마지막 줄 추가
+                if current_line:
+                    formatted_lines.append(current_line)
+        
+        # HTML 이스케이프 처리 (특수 문자가 있을 경우 HTML 엔티티로 변환)
+        escaped_lines = []
+        for line in formatted_lines:
+            escaped_line = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            escaped_lines.append(escaped_line)
+        
+        # <br> 태그로 줄바꿈 처리
+        return "<br>".join(escaped_lines)
     
     def set_caption(self, text, duration=None):
-        """자막 텍스트 설정"""
+        """완전히 개선된 자막 설정 메서드 - 잔상 제거 중점"""
+        # 이전 자막 완전히 지우기
+        self.force_complete_clear()  # 새로 추가한 함수 사용
+        
         if not text:
+            self.hide_caption()
             return
-            
+        
+        # 원본 텍스트 저장
         self.current_text = text
-        self.caption_label.setText(text)
+        
+        # 번역 텍스트 분리 (빈 줄로 구분된 경우 처리)
+        self.text_parts = text.split('\n\n', 1)
+        
+        # 텍스트 레이아웃 미리 계산
+        self.calculate_text_layout()
+        
+        # 화면 크기/위치 업데이트
+        self.update_window_size()
+        self.update_position()
         
         # 이력에 추가
         self.history.append(text)
         if len(self.history) > self.max_history:
             self.history.pop(0)
         
-        # 창 크기 조정
-        self.adjust_window_size()
-        
-        # 표시
+        # 창 표시
         if not self.isVisible():
             self.show()
             self.visible = True
+        
+        # 화면 강제 갱신
+        self.repaint()
+        
+        # 이벤트 처리 확인
+        QApplication.processEvents()
         
         # 타이머 설정 (자동 숨김)
         if duration is None:
@@ -702,88 +1066,266 @@ class CaptionOverlay(QMainWindow):
         else:
             # 계속 표시
             self.hide_timer.stop()
-    
-    def hide_caption(self):
-        """자막 숨기기"""
-        self.hide_timer.stop()
-        self.hide()
-        self.visible = False
+
+    def clear_screen(self):
+        """화면 완전히 지우기 - 개선된 버전"""
+        # 전체 자막 데이터 초기화
         self.current_text = ""
-    
+        self.text_parts = []
+        self.formatted_text_lines = []
+        
+        # 지우기 플래그 설정
+        self.clear_needed = True
+        
+        # 즉시 화면 갱신
+        self.repaint()
+        
+        # 이벤트 처리 확인 (중요)
+        QApplication.processEvents()
+
+
+    def calculate_text_layout(self):
+        """텍스트 레이아웃 계산 (줄바꿈, 위치 등)"""
+        # 화면 정보 가져오기
+        desktop = QDesktopWidget()
+        monitor_index = self.settings["position"]["monitor"]
+        screen_rect = desktop.screenGeometry(monitor_index)
+        screen_width = screen_rect.width()
+        
+        # 폰트 설정
+        font = QFont(
+            self.settings["font"]["family"],
+            self.settings["font"]["size"]
+        )
+        font.setBold(self.settings["font"]["bold"])
+        font.setItalic(self.settings["font"]["italic"])
+        
+        # 폰트 메트릭스 생성 (텍스트 크기 계산용)
+        self.font_metrics = QFontMetrics(font)
+        
+        # 최대 텍스트 너비 계산 (화면 너비의 80%)
+        max_text_width = int(screen_width * 0.8)
+        
+        # 줄바꿈 처리된 텍스트 저장
+        self.formatted_text_lines = []
+        
+        # 원본 텍스트 처리
+        if len(self.text_parts) > 0:
+            original_text = self.text_parts[0]
+            self.formatted_text_lines.append(
+                self.wrap_text(original_text, max_text_width, self.font_metrics)
+            )
+        
+        # 번역 텍스트 처리 (있는 경우)
+        if len(self.text_parts) > 1 and self.settings.get("translation", {}).get("enabled", True):
+            translation_text = self.text_parts[1]
+            self.formatted_text_lines.append(
+                self.wrap_text(translation_text, max_text_width, self.font_metrics)
+            )
+        
+        # 텍스트 가로 크기 계산 (가장 긴 줄 기준)
+        self.text_width = 0
+        for lines in self.formatted_text_lines:
+            for line in lines:
+                line_width = self.font_metrics.horizontalAdvance(line)
+                self.text_width = max(self.text_width, line_width)
+        
+        # 전체 텍스트 높이 계산
+        self.text_height = 0
+        line_spacing = int(self.font_metrics.height() * self.settings["style"]["line_spacing"])
+        
+        for i, lines in enumerate(self.formatted_text_lines):
+            self.text_height += len(lines) * line_spacing
+            
+            # 원본과 번역 사이 간격 추가 (번역이 있는 경우)
+            if i < len(self.formatted_text_lines) - 1:
+                self.text_height += line_spacing
+        
+        # 배경 크기 계산 (여백 추가)
+        padding = self.settings["style"]["background_padding"]
+        self.bg_width = self.text_width + padding * 2
+        self.bg_height = self.text_height + padding * 2
+        
+        # 최소 배경 너비 (너무 짧은 텍스트도 적절한 배경 크기 유지)
+        min_bg_width = 200
+        self.bg_width = max(self.bg_width, min_bg_width)
+
+    def wrap_text(self, text, max_width, font_metrics):
+        """텍스트 자동 줄바꿈 처리"""
+        result_lines = []
+        
+        # 이미 줄바꿈이 있는 경우 각 줄을 처리
+        lines = text.split('\n')
+        
+        for line in lines:
+            if font_metrics.horizontalAdvance(line) <= max_width:
+                # 짧은 줄은 그대로 추가
+                result_lines.append(line)
+            else:
+                # 긴 줄은 단어 단위로 분할
+                words = line.split(' ')
+                current_line = ""
+                
+                for word in words:
+                    # 현재 단어를 추가해도 최대 너비를 초과하지 않는 경우
+                    test_line = current_line + (" " if current_line else "") + word
+                    if font_metrics.horizontalAdvance(test_line) <= max_width:
+                        current_line = test_line
+                    else:
+                        # 현재 줄이 비어있고 단어가 최대 너비보다 긴 경우
+                        if not current_line:
+                            # 최대한 채워서 분할
+                            for char in word:
+                                test_line = current_line + char
+                                if font_metrics.horizontalAdvance(test_line) <= max_width:
+                                    current_line = test_line
+                                else:
+                                    if current_line:
+                                        result_lines.append(current_line)
+                                    current_line = char
+                            if current_line:
+                                result_lines.append(current_line)
+                                current_line = ""
+                        else:
+                            # 현재 줄을 추가하고 새 줄 시작
+                            result_lines.append(current_line)
+                            current_line = word
+                
+                # 마지막 줄 추가
+                if current_line:
+                    result_lines.append(current_line)
+        
+        return result_lines
+
+    def update_window_size(self):
+        """창 크기 업데이트 (버퍼 크기도 함께 업데이트)"""
+        desktop = QDesktopWidget()
+        monitor_index = self.settings["position"]["monitor"]
+        
+        if monitor_index < desktop.screenCount():
+            screen_rect = desktop.screenGeometry(monitor_index)
+        else:
+            screen_rect = desktop.availableGeometry()
+        
+        # 창 크기는 항상 화면 전체로 설정
+        self.resize(screen_rect.width(), screen_rect.height())
+        
+        # 창 크기 변경 시 버퍼도 재생성
+        if hasattr(self, 'initialize_buffer'):
+            self.initialize_buffer()
+
+    def resizeEvent(self, event):
+        """창 크기 변경 이벤트 처리 - 더 강화된 버전"""
+        # 화면 완전 초기화
+        self.force_complete_clear()
+        
+        # 필요한 경우만 버퍼 초기화
+        if hasattr(self, 'use_double_buffering') and self.use_double_buffering:
+            self.initialize_buffer()
+        
+        # 부모 클래스 메서드 호출
+        super().resizeEvent(event)
+        
+        # 크기 변경 후 추가 화면 갱신
+        self.update()
+        QApplication.processEvents()
+
+    def hide_caption(self):
+        """완전히 개선된 자막 숨기기 - 잔상 제거 중점"""
+        # 타이머 중지
+        self.hide_timer.stop()
+        
+        # 자막 관련 모든 데이터 완전 초기화
+        self.current_text = ""
+        self.text_parts = []
+        self.formatted_text_lines = []
+        self.text_width = 0
+        self.text_height = 0
+        self.bg_width = 0
+        self.bg_height = 0
+        
+        # 화면 지우기를 두 번 호출하여 확실하게 지우기
+        self.clear_screen()
+        
+        # 모든 그리기 작업이 완료될 때까지 대기
+        QApplication.processEvents()
+        
+        # 화면 갱신 후 숨기기
+        self.visible = False
+        self.hide()
+
+    def showEvent(self, event):
+        """창이 표시될 때 이벤트 처리 - 개선된 버전"""
+        super().showEvent(event)
+        
+        # 화면 지우기
+        self.clear_screen()
+        
+        # 화면 갱신
+        self.repaint()
+        QApplication.processEvents()
+
     def toggle_visibility(self):
-        """자막 표시/숨김 토글"""
+        """자막 표시/숨김 토글 (개선된 버전)"""
         if self.visible:
             self.hide_caption()
         else:
+            # 화면 완전 초기화 후 표시
+            self.force_clear_and_update()
+            
             if self.history:
                 self.set_caption(self.history[-1])
             else:
                 self.set_caption("자막 오버레이가 활성화되었습니다.")
     
     def select_monitor(self):
-        """모니터 선택 대화상자 표시"""
-        dialog = MonitorSelectDialog(self)
+        """모니터 선택 대화상자 표시 (비모달 방식으로 개선)"""
+        # 대화상자 생성
+        self.monitor_dialog = MonitorSelectDialog(self)
         
         # 현재 선택된 모니터 설정
         current_monitor = self.settings["position"]["monitor"]
-        if current_monitor < dialog.monitor_combo.count():
-            dialog.monitor_combo.setCurrentIndex(current_monitor)
+        if current_monitor < self.monitor_dialog.monitor_combo.count():
+            self.monitor_dialog.monitor_combo.setCurrentIndex(current_monitor)
         
-        # 현재 텍스트 백업 (모니터 변경 후 복원용)
+        # 대화상자 비모달로 설정
+        self.monitor_dialog.setWindowModality(Qt.NonModal)
+        
+        # 대화상자 결과 처리를 위한 연결
+        self.monitor_dialog.accepted.connect(self._handle_monitor_selection)
+        
+        # 대화상자 표시
+        self.monitor_dialog.show()
+    
+    def _handle_monitor_selection(self):
+        """모니터 선택 결과 처리"""
+        # 현재 텍스트 백업
         current_text = self.current_text
         
-        # 대화상자 표시 및 결과 처리
-        if dialog.exec_() == QDialog.Accepted:
-            selected_monitor = dialog.get_selected_monitor()
+        # 선택된 모니터 가져오기
+        selected_monitor = self.monitor_dialog.get_selected_monitor()
+        
+        # 모니터가 변경되었을 경우에만 처리
+        if selected_monitor != self.settings["position"]["monitor"]:
+            self.settings["position"]["monitor"] = selected_monitor
+            self.update_position()
             
-            # 모니터가 변경되었을 경우에만 처리
-            if selected_monitor != self.settings["position"]["monitor"]:
-                self.settings["position"]["monitor"] = selected_monitor
-                self.update_position()
+            # 변경된 모니터로 이동했음을 알림
+            desktop = QDesktopWidget()
+            if selected_monitor < desktop.screenCount():
+                monitor_info = desktop.screenGeometry(selected_monitor)
                 
-                # 변경된 모니터로 이동했음을 알림
-                desktop = QDesktopWidget()
-                if selected_monitor < desktop.screenCount():
-                    monitor_info = desktop.screenGeometry(selected_monitor)
-                    
-                    # 모니터 변경 메시지 표시 후 원래 텍스트 복원
-                    if current_text:
-                        # 모니터 변경 메시지와 함께 원래 텍스트 표시
-                        new_text = f"모니터 {selected_monitor+1}로 이동했습니다.\n({monitor_info.width()}x{monitor_info.height()})\n\n{current_text}"
-                        self.set_caption(new_text)
-                    else:
-                        # 원래 텍스트가 없었으면 모니터 변경 메시지만 표시
-                        self.set_caption(f"모니터 {selected_monitor+1}로 이동했습니다.\n({monitor_info.width()}x{monitor_info.height()})")
-    
-    def adjust_window_size(self):
-        """창 크기를 텍스트에 맞게 조정"""
-        text_size = self.caption_label.sizeHint()
-        padding = self.settings["style"]["background_padding"] * 2
-        
-        # 창 크기 설정
-        desktop = QDesktopWidget()
-        monitor_index = self.settings["position"]["monitor"]
-        
-        # 선택한 모니터의 geometry 가져오기
-        if monitor_index < desktop.screenCount():
-            screen_width = desktop.screenGeometry(monitor_index).width()
-        else:
-            screen_width = desktop.availableGeometry().width()
-            
-        max_width = int(screen_width * self.settings["style"]["max_width"])
-        
-        # 최소 너비/높이 설정
-        width = min(max(text_size.width() + padding, 200), max_width)
-        height = text_size.height() + padding
-        
-        # 창 크기 업데이트
-        self.resize(width, height)
-        
-        # 위치 업데이트
-        self.update_position()
-    
+                # 모니터 변경 메시지 표시 후 원래 텍스트 복원
+                if current_text:
+                    # 모니터 변경 메시지와 함께 원래 텍스트 표시
+                    new_text = f"모니터 {selected_monitor+1}로 이동했습니다.\n({monitor_info.width()}x{monitor_info.height()})\n\n{current_text}"
+                    self.set_caption(new_text)
+                else:
+                    # 원래 텍스트가 없었으면 모니터 변경 메시지만 표시
+                    self.set_caption(f"모니터 {selected_monitor+1}로 이동했습니다.\n({monitor_info.width()}x{monitor_info.height()})")
+
     def update_settings(self, settings):
-        """설정 업데이트"""
+        """설정 업데이트 (새 접근법 버전)"""
         # 깊은 복사를 사용하여 중첩된 설정 업데이트
         def update_nested_dict(target, source):
             for key, value in source.items():
@@ -794,61 +1336,157 @@ class CaptionOverlay(QMainWindow):
         
         update_nested_dict(self.settings, settings)
         
-        # caption_label이 초기화된 경우에만 스타일 업데이트
-        if hasattr(self, 'caption_label'):
-            # 스타일 업데이트
-            self.update_label_style()
-            
-            # 위치 업데이트
-            self.update_position()
-            
-            # 크기 업데이트
-            if self.current_text:
-                self.adjust_window_size()
+        # 현재 텍스트가 있으면 갱신
+        if hasattr(self, 'current_text') and self.current_text:
+            self.set_caption(self.current_text)
+        
+        # 설정 동기화
+        if hasattr(self, 'save_settings_to_main_config'):
+            self.save_settings_to_main_config()
+        
+        return True
     
+    def save_settings_to_main_config(self):
+        """
+        현재 설정을 메인 설정 파일로 저장하여 main.py와 동기화
+        """
+        try:
+            # 설정 파일 경로
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            settings_path = os.path.join(script_dir, "settings.json")
+            
+            if os.path.exists(settings_path):
+                # 기존 설정 파일 로드
+                with open(settings_path, 'r', encoding='utf-8') as f:
+                    main_settings = json.load(f)
+                
+                # 자막 설정 업데이트
+                if "caption" not in main_settings:
+                    main_settings["caption"] = {}
+                
+                # 설정 매핑 및 변환
+                caption_settings = main_settings["caption"]
+                
+                # font_size 설정
+                caption_settings["font_size"] = self.settings["font"]["size"]
+                
+                # position 설정
+                caption_settings["position"] = self.settings["position"]["location"]
+                
+                # display_duration 설정
+                caption_settings["display_duration"] = self.settings["display"]["duration"]
+                
+                # 번역 텍스트 표시 여부 설정 (기존 값 유지)
+                if "show_translation" not in caption_settings:
+                    caption_settings["show_translation"] = True
+                
+                # 설정 파일 저장
+                with open(settings_path, 'w', encoding='utf-8') as f:
+                    json.dump(main_settings, f, ensure_ascii=False, indent=2)
+                
+                print(f"자막 설정이 메인 설정에 동기화되었습니다: {settings_path}")
+                return True
+                
+            else:
+                print(f"메인 설정 파일을 찾을 수 없습니다: {settings_path}")
+                return False
+                
+        except Exception as e:
+            print(f"설정 동기화 중 오류 발생: {str(e)}")
+            return False
+
     def show_context_menu(self, position):
-        """컨텍스트 메뉴 표시"""
+        """컨텍스트 메뉴 표시 (개선된 버전)"""
         menu = QMenu(self)
         
         # 위치 메뉴
         position_menu = menu.addMenu("위치")
         
-        top_action = QAction("상단", self)
-        top_action.triggered.connect(lambda: self.change_position("top"))
-        position_menu.addAction(top_action)
+        # 위치 액션 그룹 (라디오 버튼 형태로 동작)
+        position_action_group = QActionGroup(self)
+        position_action_group.setExclusive(True)
         
-        middle_action = QAction("중앙", self)
-        middle_action.triggered.connect(lambda: self.change_position("middle"))
-        position_menu.addAction(middle_action)
+        # 위치별 액션 생성 및 현재 설정에 맞게 체크 표시
+        positions = [
+            ('top', '상단'),
+            ('middle', '중앙'),
+            ('bottom', '하단')
+        ]
         
-        bottom_action = QAction("하단", self)
-        bottom_action.triggered.connect(lambda: self.change_position("bottom"))
-        position_menu.addAction(bottom_action)
+        for pos_value, pos_text in positions:
+            pos_action = QAction(pos_text, self)
+            pos_action.setCheckable(True)
+            pos_action.setChecked(self.settings["position"]["location"] == pos_value)
+            pos_action.triggered.connect(lambda checked, p=pos_value: self.change_position(p))
+            
+            position_action_group.addAction(pos_action)
+            position_menu.addAction(pos_action)
         
-        # 모니터 선택 메뉴 추가
-        monitor_action = QAction("모니터 선택", self)
-        monitor_action.triggered.connect(self.select_monitor)
-        menu.addAction(monitor_action)
+        # 모니터 선택 메뉴 (수정된 부분: 대화상자에서 선택 메뉴로 변경)
+        monitor_menu = menu.addMenu("모니터 선택")
+        
+        # 모니터 액션 그룹
+        monitor_action_group = QActionGroup(self)
+        monitor_action_group.setExclusive(True)
+        
+        # 사용 가능한 모니터 목록 가져오기
+        desktop = QDesktopWidget()
+        current_monitor = self.settings["position"]["monitor"]
+        
+        # 모니터별 액션 생성
+        for i in range(desktop.screenCount()):
+            screen_geometry = desktop.screenGeometry(i)
+            primary = " (주 모니터)" if i == desktop.primaryScreen() else ""
+            monitor_text = f"모니터 {i+1}: {screen_geometry.width()}x{screen_geometry.height()}{primary}"
+            
+            monitor_action = QAction(monitor_text, self)
+            monitor_action.setCheckable(True)
+            monitor_action.setChecked(current_monitor == i)
+            monitor_action.triggered.connect(lambda checked, m=i: self.select_monitor_from_menu(m))
+            
+            monitor_action_group.addAction(monitor_action)
+            monitor_menu.addAction(monitor_action)
         
         # 글꼴 크기 메뉴
         size_menu = menu.addMenu("글꼴 크기")
         
+        # 글꼴 크기 액션 그룹
+        font_size_action_group = QActionGroup(self)
+        font_size_action_group.setExclusive(True)
+        
         for size in [18, 24, 28, 32, 36]:
             size_action = QAction(f"{size}pt", self)
+            size_action.setCheckable(True)
+            size_action.setChecked(self.settings["font"]["size"] == size)
             size_action.triggered.connect(lambda checked, s=size: self.change_font_size(s))
+            
+            font_size_action_group.addAction(size_action)
             size_menu.addAction(size_action)
         
         # 표시 시간
         duration_menu = menu.addMenu("표시 시간")
         
-        for seconds in [3, 5, 7, 10, 0]:
-            duration_text = f"{seconds}초" if seconds > 0 else "계속 표시"
+        # 표시 시간 액션 그룹
+        duration_action_group = QActionGroup(self)
+        duration_action_group.setExclusive(True)
+        
+        durations = [
+            (3000, "3초"),
+            (5000, "5초"),
+            (7000, "7초"),
+            (10000, "10초"),
+            (0, "계속 표시")
+        ]
+        
+        for duration_ms, duration_text in durations:
             duration_action = QAction(duration_text, self)
             duration_action.setCheckable(True)
-            duration_action.setChecked(self.settings["display"]["duration"] == seconds * 1000)
+            duration_action.setChecked(self.settings["display"]["duration"] == duration_ms)
             duration_action.triggered.connect(
-                lambda checked, s=seconds: self.change_duration(s * 1000)
+                lambda checked, d=duration_ms: self.change_duration(d)
             )
+            
+            duration_action_group.addAction(duration_action)
             duration_menu.addAction(duration_action)
         
         # 메뉴 구분선
@@ -878,6 +1516,39 @@ class CaptionOverlay(QMainWindow):
         # 메뉴 표시
         menu.exec_(self.mapToGlobal(position))
     
+    def select_monitor_from_menu(self, monitor_index):
+        """메뉴에서 모니터 선택 시 처리"""
+        # 현재 텍스트 백업
+        current_text = self.current_text
+        
+        # 모니터가 변경되었을 경우에만 처리
+        if monitor_index != self.settings["position"]["monitor"]:
+            # 이전 모니터 인덱스
+            old_monitor = self.settings["position"]["monitor"]
+            
+            # 설정 업데이트
+            self.settings["position"]["monitor"] = monitor_index
+            
+            # 로그 메시지
+            self.log_settings_change("모니터", f"모니터 {old_monitor+1}", f"모니터 {monitor_index+1}")
+            
+            # 위치 업데이트
+            self.update_position()
+            
+            # 사용자 피드백을 위한 화면 표시
+            desktop = QDesktopWidget()
+            if monitor_index < desktop.screenCount():
+                monitor_info = desktop.screenGeometry(monitor_index)
+                
+                # 모니터 변경 메시지 표시 후 원래 텍스트 복원
+                if current_text:
+                    # 모니터 변경 메시지와 함께 원래 텍스트 표시
+                    new_text = f"모니터 {monitor_index+1}로 이동했습니다.\n({monitor_info.width()}x{monitor_info.height()})\n\n{current_text}"
+                    self.set_caption(new_text)
+                else:
+                    # 원래 텍스트가 없었으면 모니터 변경 메시지만 표시
+                    self.set_caption(f"모니터 {monitor_index+1}로 이동했습니다.\n({monitor_info.width()}x{monitor_info.height()})")
+
     def show_shortcut_info(self):
         """단축키 안내 표시"""
         info_text = "[단축키 안내]\n" \
@@ -885,36 +1556,130 @@ class CaptionOverlay(QMainWindow):
                    "Space: 자막 보이기/숨기기"
         self.set_caption(info_text, 5000)
     
+    def log_settings_change(self, setting_name, old_value, new_value):
+        """설정 변경 로깅"""
+        # 콘솔에 로그 출력
+        print(f"[설정 변경] {setting_name}: {old_value} -> {new_value}")
+        
+        # 로그 파일에 기록 (선택적)
+        try:
+            # 로그 디렉토리 생성
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            log_dir = os.path.join(script_dir, "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            
+            # 로그 파일 경로
+            log_file = os.path.join(log_dir, "caption_settings.log")
+            
+            # 로그 메시지 생성
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            log_message = f"[{timestamp}] {setting_name}: {old_value} -> {new_value}\n"
+            
+            # 로그 파일에 추가
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(log_message)
+        except Exception as e:
+            print(f"로그 기록 중 오류 발생: {str(e)}")
+
     def change_position(self, position):
-        """자막 위치 변경"""
+        """자막 위치 변경 (새 접근법 버전)"""
+        # 이전 값 저장
+        old_position = self.settings["position"]["location"]
+        
+        # 값이 변경되지 않았으면 무시
+        if old_position == position:
+            return
+        
         # 현재 텍스트 백업
         current_text = self.current_text
         
         # 위치 변경
         self.settings["position"]["location"] = position
+        
+        # 로깅
+        self.log_settings_change("위치", old_position, position)
+        
+        # 설정 동기화
+        self.save_settings_to_main_config()
+        
+        # 창 위치 업데이트
         self.update_position()
+        
+        # 화면 갱신
+        self.update()
         
         # 텍스트 복원 (내용이 있었을 경우)
         if current_text:
             self.set_caption(current_text)
+        
+        # 메뉴 액션 상태 업데이트
+        if hasattr(self, 'position_action_group'):
+            for action in self.position_action_group.actions():
+                if position == 'top' and action.text() == '상단':
+                    action.setChecked(True)
+                elif position == 'middle' and action.text() == '중앙':
+                    action.setChecked(True)
+                elif position == 'bottom' and action.text() == '하단':
+                    action.setChecked(True)
     
     def change_font_size(self, size):
-        """글꼴 크기 변경"""
+        """글꼴 크기 변경 (새 접근법 버전)"""
+        # 이전 값 저장
+        old_size = self.settings["font"]["size"]
+        
+        # 값이 변경되지 않았으면 무시
+        if old_size == size:
+            return
+        
         # 현재 텍스트 백업
         current_text = self.current_text
         
         # 폰트 크기 변경
         self.settings["font"]["size"] = size
-        self.update_label_style()
-        self.adjust_window_size()
+        
+        # 로깅
+        self.log_settings_change("글꼴 크기", f"{old_size}pt", f"{size}pt")
+        
+        # 설정 동기화
+        self.save_settings_to_main_config()
         
         # 텍스트 복원 (내용이 있었을 경우)
         if current_text:
             self.set_caption(current_text)
+        
+        # 메뉴 액션 상태 업데이트
+        if hasattr(self, 'font_size_action_group'):
+            for action in self.font_size_action_group.actions():
+                if action.text() == f'{size}pt':
+                    action.setChecked(True)
     
     def change_duration(self, duration):
-        """표시 시간 변경"""
+        """표시 시간 변경 (새 접근법 버전)"""
+        # 이전 값 저장
+        old_duration = self.settings["display"]["duration"]
+        
+        # 값이 변경되지 않았으면 무시
+        if old_duration == duration:
+            return
+        
+        # 설정 변경
         self.settings["display"]["duration"] = duration
+        
+        # 로깅
+        if old_duration == 0:
+            old_text = "계속 표시"
+        else:
+            old_text = f"{old_duration//1000}초"
+            
+        if duration == 0:
+            new_text = "계속 표시"
+        else:
+            new_text = f"{duration//1000}초"
+            
+        self.log_settings_change("표시 시간", old_text, new_text)
+        
+        # 설정 동기화
+        self.save_settings_to_main_config()
         
         # 타이머 설정 업데이트
         if self.current_text:
@@ -924,6 +1689,18 @@ class CaptionOverlay(QMainWindow):
             else:
                 # 계속 표시
                 self.hide_timer.stop()
+        
+        # 메뉴 액션 상태 업데이트
+        if hasattr(self, 'duration_action_group'):
+            for action in self.duration_action_group.actions():
+                duration_text = ""
+                if duration == 0:
+                    duration_text = "계속 표시"
+                else:
+                    duration_text = f"{duration//1000}초"
+                    
+                if action.text() == duration_text:
+                    action.setChecked(True)
     
     @pyqtSlot(dict)
     def receive_caption(self, data):
