@@ -42,7 +42,12 @@ class SettingsManager:
                 "display_duration": 5000,       # 자막 표시 시간 (ms) - 0은 계속 표시
                 "position": "bottom",           # 자막 위치 (top, middle, bottom)
                 "show_translation": True,       # 번역문 표시 여부
-                "font_size": 28                 # 자막 폰트 크기
+                "font_size": 28,                # 자막 폰트 크기
+                "font_family": None,            # 폰트 패밀리 (None이면 OS별 기본값 사용)
+                "text_color": "#FFFFFF",        # 자막 텍스트 색상 (흰색)
+                "translation_color": "#f5cc00", # 번역 텍스트 색상 (노란색)
+                "background_color": "#66000000", # 배경 색상 (반투명 검은색)
+                "monitor": 0                    # 표시할 모니터 (0부터 시작)
             }
         }
         

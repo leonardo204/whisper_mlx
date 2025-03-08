@@ -3,7 +3,7 @@
     "calibration_duration": 3
   },
   "transcription": {
-    "model_name": "large-v3",
+    "model_name": "tiny",
     "use_faster_whisper": false,
     "max_history": 1000
   },
@@ -19,11 +19,16 @@
     "log_level": "info"
   },
   "caption": {
-    "enabled": false,
-    "auto_start": false,
-    "display_duration": 5000,
+    "enabled": true,
+    "auto_start": true,
+    "display_duration": 0,
     "position": "bottom",
     "show_translation": true,
-    "font_size": 28
+    "font_size": 36,
+    "font_family": "AppleGothic",
+    "text_color": "#FFFFFF",
+    "translation_color": "#f5cc00",
+    "background_color": "#88000000",
+    "monitor": 0
   }
 }

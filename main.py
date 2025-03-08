@@ -218,17 +218,45 @@ class RealTimeTranscriber:
                 overlay_settings['font'] = {}
             overlay_settings['font']['size'] = settings['font_size']
         
+        # 폰트 패밀리 (추가)
+        if 'font_family' in settings:
+            if 'font' not in overlay_settings:
+                overlay_settings['font'] = {}
+            overlay_settings['font']['family'] = settings['font_family']
+        
         # 위치
         if 'position' in settings:
             if 'position' not in overlay_settings:
                 overlay_settings['position'] = {}
             overlay_settings['position']['location'] = settings['position']
         
+        # 모니터 선택 (추가)
+        if 'monitor' in settings:
+            if 'position' not in overlay_settings:
+                overlay_settings['position'] = {}
+            overlay_settings['position']['monitor'] = settings['monitor']
+        
         # 표시 시간
         if 'display_duration' in settings:
             if 'display' not in overlay_settings:
                 overlay_settings['display'] = {}
             overlay_settings['display']['duration'] = settings['display_duration']
+        
+        # 색상 설정 (추가)
+        if 'text_color' in settings:
+            if 'color' not in overlay_settings:
+                overlay_settings['color'] = {}
+            overlay_settings['color']['text'] = settings['text_color']
+        
+        if 'translation_color' in settings:
+            if 'color' not in overlay_settings:
+                overlay_settings['color'] = {}
+            overlay_settings['color']['translation_text'] = settings['translation_color']
+        
+        if 'background_color' in settings:
+            if 'color' not in overlay_settings:
+                overlay_settings['color'] = {}
+            overlay_settings['color']['background'] = settings['background_color']
         
         # 번역 설정
         if 'show_translation' in settings:

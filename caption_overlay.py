@@ -538,6 +538,37 @@ class CaptionOverlay(QMainWindow):
         self.repaint()
         QApplication.processEvents()
 
+    def change_font_family(self, family):
+        """글꼴 패밀리 변경"""
+        # 이전 값 저장
+        old_family = self.settings["font"]["family"]
+        
+        # 값이 변경되지 않았으면 무시
+        if old_family == family:
+            return
+        
+        # 현재 텍스트 백업
+        current_text = self.current_text
+        
+        # 폰트 패밀리 변경
+        self.settings["font"]["family"] = family
+        
+        # 로깅
+        self.log_settings_change("글꼴 패밀리", old_family, family)
+        
+        # 설정 동기화
+        self.save_settings_to_main_config()
+        
+        # 텍스트 복원 (내용이 있었을 경우)
+        if current_text:
+            self.set_caption(current_text)
+        
+        # 메뉴 액션 상태 업데이트
+        if hasattr(self, 'font_family_action_group'):
+            for action in self.font_family_action_group.actions():
+                if action.data() == family:
+                    action.setChecked(True)
+
     def _get_default_font_family(self):
         """OS에 따른 기본 폰트 가져오기"""
         if platform.system() == 'Darwin':  # macOS
@@ -547,6 +578,74 @@ class CaptionOverlay(QMainWindow):
         else:  # Linux 등
             return "Sans"
     
+    def change_color(self, color_type):
+        """색상 변경 다이얼로그"""
+        from PyQt5.QtWidgets import QColorDialog
+        
+        # 현재 색상 가져오기
+        color_string = self.settings["color"][color_type]
+        
+        # ARGB 형식 처리 (#AARRGGBB)
+        if len(color_string) == 9 and color_string.startswith('#'):
+            alpha = int(color_string[1:3], 16)
+            r = int(color_string[3:5], 16)
+            g = int(color_string[5:7], 16)
+            b = int(color_string[7:9], 16)
+            current_color = QColor(r, g, b, alpha)
+        else:
+            # RGB 형식 (#RRGGBB)
+            current_color = QColor(color_string)
+        
+        # 색상 선택 대화상자 표시
+        color_dialog = QColorDialog(current_color, self)
+        
+        # 메인 윈도우 중앙에 표시
+        color_dialog.setWindowTitle(f"색상 선택")
+        
+        # 투명도 선택 활성화 (배경색에만 적용)
+        if color_type == 'background':
+            color_dialog.setOption(QColorDialog.ShowAlphaChannel, True)
+        
+        # 색상 선택 실행
+        if color_dialog.exec_():
+            # 선택된 색상 가져오기
+            selected_color = color_dialog.selectedColor()
+            
+            # 이전 색상 저장
+            old_color = self.settings["color"][color_type]
+            
+            # RGBA 형식으로 변환 (배경색용)
+            if color_type == 'background':
+                # ARGB 형식으로 변환 (#AARRGGBB)
+                color_value = f"#{selected_color.alpha():02x}{selected_color.red():02x}{selected_color.green():02x}{selected_color.blue():02x}"
+            else:
+                # RGB 형식으로 변환 (#RRGGBB)
+                color_value = f"#{selected_color.red():02x}{selected_color.green():02x}{selected_color.blue():02x}"
+            
+            # 색상 변경
+            self.settings["color"][color_type] = color_value
+            
+            # 색상 타입에 따른 한글 이름 설정
+            color_name_map = {
+                'text': '자막 텍스트',
+                'translation_text': '번역 텍스트',
+                'background': '배경'
+            }
+            color_name = color_name_map.get(color_type, color_type)
+            
+            # 로깅
+            self.log_settings_change(f"{color_name} 색상", old_color, color_value)
+            
+            # 설정 동기화
+            self.save_settings_to_main_config()
+            
+            # 현재 텍스트가 있으면 갱신
+            if self.current_text:
+                self.set_caption(self.current_text)
+                
+            return True
+        
+        return False
 
     def create_menu_bar(self):
         """메뉴바 생성 (개선된 버전)"""
@@ -665,6 +764,70 @@ class CaptionOverlay(QMainWindow):
             self.duration_action_group.addAction(duration_action)
             duration_menu.addAction(duration_action)
         
+        # 글꼴 패밀리 메뉴 (추가)
+        font_family_menu = settings_menu.addMenu('글꼴 패밀리')
+
+        # 글꼴 패밀리 액션 그룹
+        self.font_family_action_group = QActionGroup(self)
+        self.font_family_action_group.setExclusive(True)
+
+        # 운영체제별 글꼴 리스트
+        if platform.system() == 'Darwin':  # macOS
+            font_families = [
+                ('AppleGothic', 'Apple Gothic'),
+                ('AppleSDGothicNeo-Regular', '애플 SD 고딕'),
+                ('NanumGothic', '나눔고딕'),
+                ('NanumMyeongjo', '나눔명조'),
+                ('Arial', 'Arial'),
+                ('Helvetica', 'Helvetica')
+            ]
+        elif platform.system() == 'Windows':
+            font_families = [
+                ('맑은 고딕', '맑은 고딕'),
+                ('굴림', '굴림'),
+                ('돋움', '돋움'),
+                ('바탕', '바탕'),
+                ('궁서', '궁서'),
+                ('Arial', 'Arial'),
+                ('Helvetica', 'Helvetica')
+            ]
+        else:  # Linux
+            font_families = [
+                ('Sans', 'Sans'),
+                ('Serif', 'Serif'),
+                ('Monospace', 'Monospace'),
+                ('Arial', 'Arial'),
+                ('Helvetica', 'Helvetica')
+            ]
+
+        for family_value, family_name in font_families:
+            family_action = QAction(family_name, self)
+            family_action.setCheckable(True)
+            family_action.setChecked(self.settings["font"]["family"] == family_value)
+            family_action.setData(family_value)  # 실제 폰트 값 저장
+            family_action.triggered.connect(lambda checked, f=family_value: self.change_font_family(f))
+            
+            self.font_family_action_group.addAction(family_action)
+            font_family_menu.addAction(family_action)
+
+        # 색상 설정 메뉴 (추가)
+        color_menu = settings_menu.addMenu('색상 설정')
+
+        # 텍스트 색상 설정
+        text_color_action = QAction('자막 텍스트 색상', self)
+        text_color_action.triggered.connect(lambda: self.change_color('text'))
+        color_menu.addAction(text_color_action)
+
+        # 번역 텍스트 색상 설정
+        translation_color_action = QAction('번역 텍스트 색상', self)
+        translation_color_action.triggered.connect(lambda: self.change_color('translation_text'))
+        color_menu.addAction(translation_color_action)
+
+        # 배경 색상 설정
+        background_color_action = QAction('배경 색상', self)
+        background_color_action.triggered.connect(lambda: self.change_color('background'))
+        color_menu.addAction(background_color_action)
+
         # 도움말 메뉴
         help_menu = menubar.addMenu('도움말')
         
@@ -1347,9 +1510,7 @@ class CaptionOverlay(QMainWindow):
         return True
     
     def save_settings_to_main_config(self):
-        """
-        현재 설정을 메인 설정 파일로 저장하여 main.py와 동기화
-        """
+        """현재 설정을 메인 설정 파일로 저장하여 main.py와 동기화"""
         try:
             # 설정 파일 경로
             script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1370,11 +1531,22 @@ class CaptionOverlay(QMainWindow):
                 # font_size 설정
                 caption_settings["font_size"] = self.settings["font"]["size"]
                 
+                # font_family 설정 (추가)
+                caption_settings["font_family"] = self.settings["font"]["family"]
+                
                 # position 설정
                 caption_settings["position"] = self.settings["position"]["location"]
                 
+                # monitor 설정 (추가)
+                caption_settings["monitor"] = self.settings["position"]["monitor"]
+                
                 # display_duration 설정
                 caption_settings["display_duration"] = self.settings["display"]["duration"]
+                
+                # 색상 설정 (추가)
+                caption_settings["text_color"] = self.settings["color"]["text"]
+                caption_settings["translation_color"] = self.settings["color"]["translation_text"]
+                caption_settings["background_color"] = self.settings["color"]["background"]
                 
                 # 번역 텍스트 표시 여부 설정 (기존 값 유지)
                 if "show_translation" not in caption_settings:
@@ -1446,6 +1618,9 @@ class CaptionOverlay(QMainWindow):
             
             monitor_action_group.addAction(monitor_action)
             monitor_menu.addAction(monitor_action)
+
+        # 메뉴 구분선
+        menu.addSeparator()
         
         # 글꼴 크기 메뉴
         size_menu = menu.addMenu("글꼴 크기")
@@ -1488,7 +1663,83 @@ class CaptionOverlay(QMainWindow):
             
             duration_action_group.addAction(duration_action)
             duration_menu.addAction(duration_action)
-        
+                
+        # 글꼴 패밀리 메뉴 (컨텍스트 메뉴에 추가)
+        font_family_menu = menu.addMenu("글꼴 패밀리")
+
+        # 글꼴 패밀리 액션 그룹
+        font_family_action_group = QActionGroup(self)
+        font_family_action_group.setExclusive(True)
+
+        if platform.system() == 'Darwin':  # macOS
+            font_families = [
+                ('AppleGothic', 'Apple Gothic'),
+                ('AppleSDGothicNeo-Regular', '애플 SD 고딕'),
+                ('NanumGothic', '나눔고딕'),
+                ('NanumMyeongjo', '나눔명조'),
+                ('Arial', 'Arial'),
+                ('Helvetica', 'Helvetica')
+            ]
+        elif platform.system() == 'Windows':
+            font_families = [
+                ('맑은 고딕', '맑은 고딕'),
+                ('굴림', '굴림'),
+                ('돋움', '돋움'),
+                ('바탕', '바탕'),
+                ('궁서', '궁서'),
+                ('Arial', 'Arial'),
+                ('Helvetica', 'Helvetica')
+            ]
+        else:  # Linux
+            font_families = [
+                ('Sans', 'Sans'),
+                ('Serif', 'Serif'),
+                ('Monospace', 'Monospace'),
+                ('Arial', 'Arial'),
+                ('Helvetica', 'Helvetica')
+            ]
+
+        for family_value, family_name in font_families:
+            family_action = QAction(family_name, self)
+            family_action.setCheckable(True)
+            family_action.setChecked(self.settings["font"]["family"] == family_value)
+            family_action.setData(family_value)  # 실제 폰트 값 저장
+            family_action.triggered.connect(lambda checked, f=family_value: self.change_font_family(f))
+            
+            self.font_family_action_group.addAction(family_action)
+            font_family_menu.addAction(family_action)
+
+        for family_value, family_name in font_families:
+            family_action = QAction(family_name, self)
+            family_action.setCheckable(True)
+            family_action.setChecked(self.settings["font"]["family"] == family_value)
+            family_action.setData(family_value)
+            family_action.triggered.connect(lambda checked, f=family_value: self.change_font_family(f))
+            
+            font_family_action_group.addAction(family_action)
+            font_family_menu.addAction(family_action)
+
+        # 메뉴 구분선
+        menu.addSeparator()
+
+        # 색상 설정 메뉴 (추가)
+        color_menu = menu.addMenu("색상 설정")
+
+        # 텍스트 색상 설정
+        text_color_action = QAction('자막 텍스트 색상', self)
+        text_color_action.triggered.connect(lambda: self.change_color('text'))
+        color_menu.addAction(text_color_action)
+
+        # 번역 텍스트 색상 설정
+        translation_color_action = QAction('번역 텍스트 색상', self)
+        translation_color_action.triggered.connect(lambda: self.change_color('translation_text'))
+        color_menu.addAction(translation_color_action)
+
+        # 배경 색상 설정
+        background_color_action = QAction('배경 색상', self)
+        background_color_action.triggered.connect(lambda: self.change_color('background'))
+        color_menu.addAction(background_color_action)
+
         # 메뉴 구분선
         menu.addSeparator()
         

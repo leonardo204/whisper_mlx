@@ -346,7 +346,7 @@ class CaptionClient:
             return False
     
     def update_settings(self, settings):
-        """자막 설정 업데이트 (수정된 버전)"""
+        """자막 설정 업데이트 (확장된 버전)"""
         # 설정이 딕셔너리인지 확인
         if not isinstance(settings, dict):
             logger.warning("유효하지 않은 설정 형식입니다.")
@@ -377,6 +377,12 @@ class CaptionClient:
                 expanded_settings['position'] = {}
             expanded_settings['position']['location'] = settings['position']
         
+        # 모니터 설정 (추가)
+        if 'monitor' in settings:
+            if 'position' not in expanded_settings:
+                expanded_settings['position'] = {}
+            expanded_settings['position']['monitor'] = settings['monitor']
+        
         # 오프셋 설정
         if 'offset_x' in settings:
             if 'position' not in expanded_settings:
@@ -394,11 +400,16 @@ class CaptionClient:
                 expanded_settings['display'] = {}
             expanded_settings['display']['duration'] = settings['display_duration']
         
-        # 색상 설정
+        # 색상 설정 (확장)
         if 'text_color' in settings:
             if 'color' not in expanded_settings:
                 expanded_settings['color'] = {}
             expanded_settings['color']['text'] = settings['text_color']
+        
+        if 'translation_color' in settings:
+            if 'color' not in expanded_settings:
+                expanded_settings['color'] = {}
+            expanded_settings['color']['translation_text'] = settings['translation_color']
         
         if 'background_color' in settings:
             if 'color' not in expanded_settings:
