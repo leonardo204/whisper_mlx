@@ -1709,16 +1709,6 @@ class CaptionOverlay(QMainWindow):
             self.font_family_action_group.addAction(family_action)
             font_family_menu.addAction(family_action)
 
-        for family_value, family_name in font_families:
-            family_action = QAction(family_name, self)
-            family_action.setCheckable(True)
-            family_action.setChecked(self.settings["font"]["family"] == family_value)
-            family_action.setData(family_value)
-            family_action.triggered.connect(lambda checked, f=family_value: self.change_font_family(f))
-            
-            font_family_action_group.addAction(family_action)
-            font_family_menu.addAction(family_action)
-
         # 메뉴 구분선
         menu.addSeparator()
 
