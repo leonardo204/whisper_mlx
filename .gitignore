@@ -1,4 +1,43 @@
+# System files
 .DS_Store
+*.swp
+*.swo
+Thumbs.db
+
+# Python environments
 .venv/
+venv/
+env/
+.env
+
+# Python generated files
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Logs and databases
+*.log
+logs/
+results/
+
+# Project specific
 mlx_models/
+
+# IDEs and editors
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+.project
+.pydevproject
